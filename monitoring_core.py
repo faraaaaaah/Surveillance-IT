@@ -26,7 +26,7 @@ DELAI_MAX_LLM_SECONDES = 6
 # --- Chargement du modèle IA (module 2) ---
 _CHEMIN_MODELE = os.path.join(
     os.path.dirname(os.path.abspath(__file__)),
-    "..", "surveillance_temps_reel", "modele.pkl"
+    "modele.pkl"
 )
 with open(_CHEMIN_MODELE, "rb") as f:
     _donnees_modele = pickle.load(f)
