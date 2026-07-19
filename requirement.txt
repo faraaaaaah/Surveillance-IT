@@ -1,5 +1,12 @@
-requests
 flask
 flask-socketio
+requests
 reportlab
 matplotlib
+psutil
+scikit-learn
+numpy
+pandas
+joblib
+ollama
+twilio
