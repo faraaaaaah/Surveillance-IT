@@ -6,6 +6,7 @@ COPY --chown=1001:0 requirement.txt .
 RUN pip install --no-cache-dir -r requirement.txt
 
 COPY --chown=1001:0 . .
+RUN chmod -R g=u /opt/app-root/src
 
 ENV PORT=8080
 EXPOSE 8080
