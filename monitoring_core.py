@@ -15,8 +15,10 @@ import psutil
 import pandas as pd
 import ollama
 from datetime import datetime
+from zoneinfo import ZoneInfo
 from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeoutError
 
+FUSEAU_LOCAL = ZoneInfo("Africa/Tunis")
 # Pool dédié à l'appel LLM : permet de le "timeout-er" proprement (voir
 # expliquer() ci-dessous) sans jamais bloquer indéfiniment le cycle de
 # surveillance, qui doit rester rapide pour que les alertes partent vite.
@@ -94,7 +96,7 @@ def lire_metriques():
     _prev_disk = disk_io
 
     return {
-        "timestamp": datetime.now().strftime("%H:%M:%S"),
+        "timestamp": datetime.now(FUSEAU_LOCAL).strftime("%H:%M:%S"),
         "cpu": cpu,
         "memoire": mem.percent,
         "memoire_gb": round(mem.used / (1024 ** 3), 2),

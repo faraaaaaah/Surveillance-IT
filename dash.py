@@ -27,7 +27,7 @@ from flask_socketio import SocketIO
 
 from monitoring_core import lire_metriques, detecter_anomalies, expliquer, expliquer_par_type
 import notifier
-from notifier import envoyer_alerte_slack, envoyer_sms_alerte, notifier_bureau_persistant
+from notifier import envoyer_alerte_slack, envoyer_sms_alerte, envoyer_email_alerte, notifier_bureau_persistant
 import historique
 from rapport_pdf import lancer_planificateur_en_arriere_plan, generer_rapport
 from chatbot import repondre_question
@@ -142,6 +142,7 @@ def _traiter_anomalies_en_arriere_plan(serveur: str, m: dict, anomalies: list, e
 
         envoyer_alerte_slack(m, anomalies, explication_combinee)
         envoyer_sms_alerte(m, anomalies, explication_combinee)
+        envoyer_email_alerte(m, anomalies, explication_combinee)
         notifier_bureau_persistant(m, anomalies, explication_combinee, explications_par_type)
         historique.enregistrer_anomalie(m, anomalies, explication_combinee, serveur=serveur,
                                          explications_par_type=explications_par_type)

@@ -12,7 +12,21 @@ import sqlite3
 import threading
 import time
 from datetime import datetime, timedelta
+from zoneinfo import ZoneInfo
 from contextlib import contextmanager
+
+# Meme fuseau que monitoring_core.py : le serveur (OpenShift, etc.) tourne
+# souvent en UTC quel que soit l'endroit d'ou on le consulte. On force donc
+# explicitement l'heure de Tunis pour TOUS les timestamps stockes ici
+# (debut/derniere_occurrence/fin d'incident, mesures...), sinon l'historique
+# affiche dans le dashboard se decale selon l'hebergeur.
+FUSEAU_LOCAL = ZoneInfo("Africa/Tunis")
+
+
+def maintenant_local() -> datetime:
+    """Horodatage courant dans le fuseau de Tunis, independant de l'horloge
+    systeme du serveur qui execute le code."""
+    return datetime.now(FUSEAU_LOCAL).replace(tzinfo=None)
 
 CHEMIN_DB = os.path.join(os.path.dirname(os.path.abspath(__file__)), "historique_anomalies.db")
 
@@ -284,7 +298,7 @@ def infos_type(type_anomalie: str) -> dict:
 
 def enregistrer_serveur_vu(serveur: str):
     initialiser_db()
-    maintenant = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    maintenant = maintenant_local().strftime("%Y-%m-%d %H:%M:%S")
     _execute_with_lock(
         """INSERT INTO serveurs (nom, derniere_maj) VALUES (?, ?)
            ON CONFLICT(nom) DO UPDATE SET derniere_maj = excluded.derniere_maj""",
@@ -309,7 +323,7 @@ def enregistrer_anomalie(m: dict, anomalies: list, explication: str = None, serv
 
     initialiser_db()
     enregistrer_serveur_vu(serveur)
-    maintenant = datetime.now()
+    maintenant = maintenant_local()
     maintenant_str = maintenant.strftime("%Y-%m-%d %H:%M:%S")
     seuil_regroupement = (maintenant - timedelta(minutes=FENETRE_REGROUPEMENT_MINUTES)).strftime("%Y-%m-%d %H:%M:%S")
 
@@ -383,7 +397,7 @@ def mettre_a_jour_stabilisation(serveur: str, m: dict) -> list:
     if not m:
         return []
     initialiser_db()
-    maintenant_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    maintenant_str = maintenant_local().strftime("%Y-%m-%d %H:%M:%S")
     ids_changes = []
 
     with _db_lock:
@@ -412,16 +426,16 @@ def resoudre_incidents_expires(minutes_inactivite: int = 10):
       distant s'est arrete en pleine anomalie et ne peut plus confirmer
       que la metrique est revenue a la normale)."""
     initialiser_db()
-    maintenant_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    maintenant_str = maintenant_local().strftime("%Y-%m-%d %H:%M:%S")
 
-    seuil_stabilisation = (datetime.now() - timedelta(minutes=DELAI_STABILISATION_MINUTES)).strftime("%Y-%m-%d %H:%M:%S")
+    seuil_stabilisation = (maintenant_local() - timedelta(minutes=DELAI_STABILISATION_MINUTES)).strftime("%Y-%m-%d %H:%M:%S")
     _execute_with_lock(
         """UPDATE incidents SET statut = 'resolu', fin = ?
            WHERE statut = 'surveillance' AND stabilise_depuis < ?""",
         (maintenant_str, seuil_stabilisation)
     )
 
-    seuil_inactivite = (datetime.now() - timedelta(minutes=minutes_inactivite)).strftime("%Y-%m-%d %H:%M:%S")
+    seuil_inactivite = (maintenant_local() - timedelta(minutes=minutes_inactivite)).strftime("%Y-%m-%d %H:%M:%S")
     _execute_with_lock(
         """UPDATE incidents SET statut = 'resolu', fin = ?
            WHERE statut = 'ouvert' AND derniere_occurrence < ?""",
@@ -431,7 +445,7 @@ def resoudre_incidents_expires(minutes_inactivite: int = 10):
 
 def resoudre_incident_manuellement(incident_id: int):
     initialiser_db()
-    maintenant_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    maintenant_str = maintenant_local().strftime("%Y-%m-%d %H:%M:%S")
     _execute_with_lock(
         """UPDATE incidents SET statut = 'resolu', fin = ? WHERE id = ?""",
         (maintenant_str, incident_id)
@@ -529,7 +543,7 @@ def initialiser_table_mesures():
 def enregistrer_mesure(serveur: str, m: dict):
     """A appeler a CHAQUE cycle : ne stocke reellement qu'un point par minute
     par serveur (le reste du temps, ne fait rien - tres rapide)."""
-    maintenant = datetime.now()
+    maintenant = maintenant_local()
     
     with _mesure_lock:
         dernier = _dernier_enregistrement_mesure.get(serveur)
@@ -549,7 +563,7 @@ def enregistrer_mesure(serveur: str, m: dict):
 
 def recuperer_mesures(serveur: str, heures: float = 1):
     initialiser_table_mesures()
-    depuis = (datetime.now() - timedelta(hours=heures)).strftime("%Y-%m-%d %H:%M:%S")
+    depuis = (maintenant_local() - timedelta(hours=heures)).strftime("%Y-%m-%d %H:%M:%S")
     rows = _execute_with_lock(
         """SELECT horodatage, cpu, memoire, disque_pct, paquets_perdus, nb_processus, batterie FROM mesures
            WHERE serveur = ? AND horodatage >= ?
@@ -563,7 +577,7 @@ def recuperer_mesures(serveur: str, heures: float = 1):
 def nettoyer_vieilles_mesures():
     """A appeler periodiquement pour eviter que la base grossisse indefiniment."""
     initialiser_table_mesures()
-    seuil = (datetime.now() - timedelta(days=RETENTION_JOURS)).strftime("%Y-%m-%d %H:%M:%S")
+    seuil = (maintenant_local() - timedelta(days=RETENTION_JOURS)).strftime("%Y-%m-%d %H:%M:%S")
     _execute_with_lock("DELETE FROM mesures WHERE horodatage < ?", (seuil,))
 
 
@@ -571,7 +585,7 @@ def calculer_score_sante(serveur: str = "local", m_actuel: dict = None, fenetre_
     """Calcule un score de sante 0-100, combinant l'etat instantane des
     metriques et la frequence des incidents recents."""
     initialiser_db()
-    maintenant = datetime.now()
+    maintenant = maintenant_local()
     depuis_dt = maintenant - timedelta(hours=fenetre_heures)
     depuis = depuis_dt.strftime("%Y-%m-%d %H:%M:%S")
     maintenant_str = maintenant.strftime("%Y-%m-%d %H:%M:%S")
@@ -648,7 +662,7 @@ def contexte_pour_chatbot(serveur: str = None, jours: int = 7, limite: int = 40)
     """Construit un resume textuel de l'historique recent, a injecter dans
     le prompt du LLM pour repondre a des questions en langage naturel."""
     initialiser_db()
-    depuis = (datetime.now() - timedelta(days=jours)).strftime("%Y-%m-%d %H:%M:%S")
+    depuis = (maintenant_local() - timedelta(days=jours)).strftime("%Y-%m-%d %H:%M:%S")
     conditions, params = ["derniere_occurrence >= ?"], [depuis]
     if serveur:
         conditions.append("serveur = ?")

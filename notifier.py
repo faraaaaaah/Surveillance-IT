@@ -21,8 +21,10 @@ Configuration :
 import os
 import time
 import json
+import smtplib
 import threading
 import requests
+from email.mime.text import MIMEText
 from datetime import datetime, timedelta
 from historique import metrique_est_normale, a_une_metrique
 
@@ -272,6 +274,142 @@ def envoyer_alerte_slack(m: dict, anomalies: list[str], explication: str) -> boo
     except requests.RequestException as e:
         print(f"⚠️  Échec envoi Slack (réseau) : {e}")
         return False
+
+
+# ---------------------------------------------------------------------------
+# Alerte email (SMTP) — anti-spam par type d'anomalie
+# ---------------------------------------------------------------------------
+# Même philosophie anti-spam que Slack/toast, mais suivi INDÉPENDANT (son
+# propre cooldown, son propre état actif/résolu) : on ne veut pas qu'un
+# email dépende de si Slack est configuré ou non, ni l'inverse.
+#
+#   - 1 email par type de problème (pas un email par ligne d'anomalie)
+#   - au premier dépassement de seuil : email immédiat
+#   - tant que le problème persiste : au plus 1 rappel toutes les
+#     EMAIL_COOLDOWN_SECONDES (10 min par défaut) — pas à chaque cycle
+#   - dès que la métrique repasse sous le seuil de résolution
+#     (historique.metrique_est_normale, même règle que le reste de l'appli) :
+#     UN SEUL email "c'est réglé", puis silence
+
+EMAIL_HOST = os.environ.get("EMAIL_SMTP_HOST", "smtp.gmail.com")
+EMAIL_PORT = int(os.environ.get("EMAIL_SMTP_PORT", "465"))
+EMAIL_USER = os.environ.get("EMAIL_USER", "")
+EMAIL_PASSWORD = os.environ.get("EMAIL_PASSWORD", "")
+EMAIL_DEST = os.environ.get("EMAIL_DEST", "")
+COOLDOWN_EMAIL_SECONDES = int(os.environ.get("EMAIL_COOLDOWN_SECONDES", "600"))  # 10 min
+
+_email_actifs = {}          # cle_anomalie -> True tant qu'un email "problème" a été envoyé et pas encore suivi d'un email "résolu"
+_dernier_envoi_email = {}   # cle_anomalie -> timestamp du dernier envoi (cooldown)
+_email_lock = threading.Lock()
+
+
+def _envoyer_email(sujet: str, corps: str) -> bool:
+    """Envoi SMTP bas niveau. Ne lève JAMAIS d'exception vers l'appelant
+    (même règle que Slack/WhatsApp : un souci email ne doit jamais faire
+    planter le cycle de surveillance)."""
+    destinataires = [d.strip() for d in EMAIL_DEST.split(",") if d.strip()]
+    msg = MIMEText(corps, "plain", "utf-8")
+    msg["Subject"] = sujet
+    msg["From"] = EMAIL_USER
+    msg["To"] = ", ".join(destinataires)
+
+    try:
+        if EMAIL_PORT == 465:
+            with smtplib.SMTP_SSL(EMAIL_HOST, EMAIL_PORT, timeout=10) as serveur:
+                serveur.login(EMAIL_USER, EMAIL_PASSWORD)
+                serveur.sendmail(EMAIL_USER, destinataires, msg.as_string())
+        else:
+            with smtplib.SMTP(EMAIL_HOST, EMAIL_PORT, timeout=10) as serveur:
+                serveur.starttls()
+                serveur.login(EMAIL_USER, EMAIL_PASSWORD)
+                serveur.sendmail(EMAIL_USER, destinataires, msg.as_string())
+        return True
+    except Exception as e:
+        print(f"⚠️  Échec envoi email : {e}")
+        return False
+
+
+def envoyer_email_alerte(m: dict, anomalies: list[str], explication: str,
+                          explications_par_type: dict = None) -> bool:
+    """
+    Envoie une alerte email UNIQUEMENT pour les anomalies critiques (🔴) —
+    même filtre que envoyer_sms_alerte(), les 🟠 ne déclenchent jamais
+    d'email. Anti-spam : un email à l'apparition du problème, puis au plus
+    un rappel toutes les COOLDOWN_EMAIL_SECONDES tant qu'il persiste, puis
+    un seul email de résolution quand la métrique redevient normale.
+
+    Args:
+        m: dict des métriques (sortie de lire_metriques())
+        anomalies: liste des anomalies détectées ce cycle (peut être vide —
+            utile pour laisser passer les emails de résolution)
+        explication: texte de repli si aucune explication par type n'est fournie
+        explications_par_type: dict optionnel {type: explication}, pour que
+            chaque email porte l'explication qui correspond VRAIMENT à son
+            problème (voir monitoring_core.expliquer_par_type)
+
+    Returns:
+        True si au moins un email a été envoyé, False sinon.
+    """
+    critiques = [a for a in anomalies if a.startswith("🔴")]
+
+    if not (EMAIL_HOST and EMAIL_USER and EMAIL_PASSWORD and EMAIL_DEST):
+        if critiques:
+            print("⚠️  Config EMAIL_* incomplète — alerte email ignorée.")
+        return False
+
+    au_moins_un_envoi = False
+
+    # 1) Résolutions : un email "c'est réglé" une seule fois par type, même
+    #    si aucune nouvelle anomalie critique n'est présente ce cycle.
+    #    (_email_actifs ne contient que des types déjà notifiés en critique,
+    #    voir étape 2, donc cette boucle reste correcte sans filtre en plus.)
+    with _email_lock:
+        actifs_snapshot = list(_email_actifs)
+    for cle in actifs_snapshot:
+        if _est_anomalie_resolue(cle, m):
+            with _email_lock:
+                _email_actifs.pop(cle, None)
+            sujet = f"✅ Résolu : {cle} — {m['timestamp']}"
+            corps = (
+                f"L'anomalie '{cle}' est revenue à la normale.\n\n"
+                f"CPU: {m['cpu']}% | Mémoire: {m['memoire']}% | "
+                f"Disque: {m['disque_pct']}% | Processus: {m['nb_processus']}"
+            )
+            if _envoyer_email(sujet, corps):
+                au_moins_un_envoi = True
+                print(f"📧 Email de résolution envoyé ({cle}).")
+
+    if not critiques:
+        return au_moins_un_envoi
+
+    # 2) Nouvelles alertes / rappels : regroupées par type, sous cooldown —
+    #    seulement pour les types marqués critiques (🔴).
+    par_type = {}
+    for a in critiques:
+        par_type.setdefault(_cle_anomalie(a), []).append(a)
+
+    maintenant = time.time()
+    for cle, messages in par_type.items():
+        with _email_lock:
+            dernier = _dernier_envoi_email.get(cle, 0)
+            if maintenant - dernier < COOLDOWN_EMAIL_SECONDES:
+                continue  # déjà notifié récemment pour ce type — on n'envoie pas à chaque cycle
+            _dernier_envoi_email[cle] = maintenant
+            _email_actifs[cle] = True
+
+        exp = (explications_par_type or {}).get(cle) or explication or ""
+        sujet = f"🚨 {messages[0].lstrip('🔴🟠 ')} — {m['timestamp']}"
+        corps = (
+            "\n".join(messages)
+            + f"\n\nCPU: {m['cpu']}% | Mémoire: {m['memoire']}% | "
+              f"Disque: {m['disque_pct']}% | Processus: {m['nb_processus']}"
+            + (f"\n\n💬 Analyse : {exp}" if exp else "")
+        )
+        if _envoyer_email(sujet, corps):
+            au_moins_un_envoi = True
+            print(f"📧 Alerte email envoyée ({cle}).")
+
+    return au_moins_un_envoi
 
 
 # ---------------------------------------------------------------------------
@@ -554,4 +692,5 @@ if __name__ == "__main__":
     )
     envoyer_alerte_slack(faux_metriques, fausses_anomalies, fausse_explication)
     envoyer_sms_alerte(faux_metriques, fausses_anomalies, fausse_explication)
+    envoyer_email_alerte(faux_metriques, fausses_anomalies, fausse_explication)
     notifier_bureau_persistant(faux_metriques, fausses_anomalies, fausse_explication)
