@@ -72,7 +72,14 @@ def lire_metriques():
     disque = psutil.disk_usage('/')
     disk_io = psutil.disk_io_counters()
     net = psutil.net_io_counters()
-    batterie = psutil.sensors_battery()
+    # psutil.sensors_battery() renvoie None des que le systeme n'expose pas
+    # d'info batterie (PC de bureau, VM, conteneur, ou laptop selon l'OS/les
+    # droits) - PAS uniquement quand la batterie est a 100%. Avant, ce None
+    # etait remplace par un "100% + en charge" fixe, indiscernable d'une
+    # vraie lecture a 100% : la metrique semblait figee car c'etait en fait
+    # une valeur bidon reconduite a chaque cycle, jamais une vraie mesure.
+    batterie_brute = psutil.sensors_battery()
+    batterie_disponible = batterie_brute is not None
     top_processus = sorted(
         psutil.process_iter(['name', 'cpu_percent']),
         key=lambda p: p.info['cpu_percent'],
@@ -108,8 +115,9 @@ def lire_metriques():
         "paquets_perdus": paquets_perdus_delta,
         "nb_processus": len(psutil.pids()),
         "top_processus": [p.info['name'] for p in top_processus],
-        "batterie": round(batterie.percent, 1) if batterie else 100,
-        "en_charge": batterie.power_plugged if batterie else True,
+        "batterie": round(batterie_brute.percent, 1) if batterie_disponible else None,
+        "en_charge": batterie_brute.power_plugged if batterie_disponible else None,
+        "batterie_disponible": batterie_disponible,
         "erreurs": paquets_perdus_delta,
     }
 
@@ -145,10 +153,13 @@ def detecter_anomalies(m):
     if m["nb_processus"] >= SEUILS["nb_processus"]:
         anomalies.append(f"🟠 Trop de processus : {m['nb_processus']}")
 
-    if m["batterie"] <= SEUILS["batterie"] and not m["en_charge"]:
-        anomalies.append(f"🔴 Batterie critique : {m['batterie']}%")
-    elif m["batterie"] <= SEUILS_WARNING["batterie"] and not m["en_charge"]:
-        anomalies.append(f"🟠 Batterie faible : {m['batterie']}%")
+    # On ne juge la batterie que si une vraie lecture a ete obtenue (voir
+    # lire_metriques) : pas de capteur -> pas d'anomalie fabriquee.
+    if m.get("batterie_disponible"):
+        if m["batterie"] <= SEUILS["batterie"] and not m["en_charge"]:
+            anomalies.append(f"🔴 Batterie critique : {m['batterie']}%")
+        elif m["batterie"] <= SEUILS_WARNING["batterie"] and not m["en_charge"]:
+            anomalies.append(f"🟠 Batterie faible : {m['batterie']}%")
 
     valeurs = [[
         m["cpu"], m["memoire"], m["disque_pct"],

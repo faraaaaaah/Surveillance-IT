@@ -900,7 +900,20 @@ function renderPrincipal(){
     const grille = document.getElementById('grille-metriques');
     grille.innerHTML = CARTES.map(c => {
       const valeur = m[c.cle];
-      const couleur = valeur >= c.seuil ? '#F85149' : (valeur >= c.seuil*0.8 ? '#D29922' : '#3FB950');
+      // Pas de capteur batterie (PC de bureau, VM...) -> valeur = null.
+      // On l'affiche distinctement au lieu de montrer "null%".
+      if(valeur === null || valeur === undefined){
+        return `<div class="carte"><div class="label">${c.label}</div>
+                  <div class="valeur" style="color:var(--muted)">N/D</div></div>`;
+      }
+      // Pour la batterie, une valeur BASSE est le probleme (inverse du
+      // reste : cpu/memoire/disque/processus/paquets sont dangereux quand
+      // ILS montent). Avant, la meme regle "valeur >= seuil = rouge" etait
+      // appliquee partout, ce qui coloriait la batterie en rouge quasiment
+      // tout le temps (des 15%+) au lieu de seulement quand elle est faible.
+      const couleur = c.cle === 'batterie'
+        ? (valeur <= c.seuil ? '#F85149' : (valeur <= c.seuil*1.6 ? '#D29922' : '#3FB950'))
+        : (valeur >= c.seuil ? '#F85149' : (valeur >= c.seuil*0.8 ? '#D29922' : '#3FB950'));
       return `<div class="carte"><div class="label">${c.label}</div>
                 <div class="valeur" style="color:${couleur}">${valeur}${c.unite}</div></div>`;
     }).join('');
