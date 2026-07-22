@@ -1,5 +1,6 @@
 flask
 flask-socketio
+flask-login
 requests
 reportlab
 matplotlib
@@ -11,3 +12,6 @@ joblib
 ollama
 twilio
 tzdata
+werkzeug
+python-socketio
+eventlet
