@@ -334,17 +334,21 @@ def accueil():
     liens_admin = ""
     if current_user.is_admin:
         liens_admin = (
-            f'<a class="btn-periode" style="padding:7px 12px;text-decoration:none;" '
-            f'href="{url_for("auth.admin_utilisateurs")}">👤 Utilisateurs</a>'
-            f'<a class="btn-periode" style="padding:7px 12px;text-decoration:none;" '
-            f'href="{url_for("destinataires.page_responsables")}">📣 Responsables</a>'
+            f'<a class="menu-item" href="{url_for("auth.admin_utilisateurs")}">👤 Gérer les utilisateurs</a>'
+            f'<a class="menu-item" href="{url_for("destinataires.page_responsables")}">📣 Gérer les responsables</a>'
         )
-    barre = (
-        f'<span style="color:var(--muted); font-size:13px;">{current_user.username}</span>'
-        f'{liens_admin}'
-        f'<a class="btn-periode" style="padding:7px 12px;text-decoration:none;" '
-        f'href="{url_for("auth.logout")}">🚪 Deconnexion</a>'
-    )
+    barre = f'''
+    <div class="user-menu-wrapper">
+        <span class="user-name" id="userMenuBtn">{current_user.username} ▾</span>
+        <div class="user-dropdown" id="userDropdown">
+            <div class="menu-item" onclick="alert('Profil - Fonctionnalité à venir')">👤 Profil</div>
+            <div class="menu-item" onclick="alert('Paramètres - Fonctionnalité à venir')">⚙️ Paramètres</div>
+            {liens_admin}
+            <hr style="border-color:var(--border); margin:4px 0;">
+            <a class="menu-item" href="{url_for("auth.logout")}" style="color:var(--crit);">🚪 Déconnexion</a>
+        </div>
+    </div>
+    '''
     return PAGE_HTML.replace("<!--__BARRE_UTILISATEUR__-->", barre)
 
 
@@ -494,6 +498,63 @@ PAGE_HTML = """
   #chat-form{display:flex; border-top:1px solid var(--border);}
   #chat-input{flex:1; background:transparent; border:none; color:var(--text); padding:10px 12px; font-size:12.5px; outline:none;}
   #chat-form button{background:none; border:none; color:var(--accent); font-weight:700; padding:0 14px; cursor:pointer;}
+
+  
+  /* Menu utilisateur déroulant */
+.user-menu-wrapper {
+  position: relative;
+  display: inline-block;
+}
+.user-name {
+  color: var(--text);
+  font-size: 13px;
+  cursor: pointer;
+  padding: 6px 10px;
+  border-radius: 6px;
+  transition: background 0.2s;
+  user-select: none;
+}
+.user-name:hover {
+  background: var(--panel2);
+}
+.user-dropdown {
+  display: none;
+  position: absolute;
+  top: calc(100% + 6px);
+  right: 0;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  min-width: 200px;
+  z-index: 100;
+  box-shadow: 0 8px 30px rgba(0,0,0,0.4);
+  padding: 6px 0;
+  overflow: hidden;
+}
+.user-dropdown.ouvert {
+  display: block;
+}
+.user-dropdown .menu-item {
+  display: block;
+  padding: 8px 16px;
+  font-size: 13px;
+  color: var(--text);
+  text-decoration: none;
+  cursor: pointer;
+  transition: background 0.15s;
+  border: none;
+  background: transparent;
+  width: 100%;
+  text-align: left;
+}
+.user-dropdown .menu-item:hover {
+  background: var(--panel2);
+}
+.user-dropdown hr {
+  margin: 4px 12px;
+  border: none;
+  border-top: 1px solid var(--border);
+}
 </style>
 </head>
 <body>
@@ -1389,6 +1450,34 @@ document.getElementById('chat-form').addEventListener('submit', async (ev) => {
     document.getElementById(idAttente).textContent = 'Erreur de connexion au serveur.';
   }
   messages.scrollTop = messages.scrollHeight;
+});
+
+// --- Menu utilisateur déroulant (hover) ---
+document.addEventListener('DOMContentLoaded', function() {
+    const wrapper = document.querySelector('.user-menu-wrapper');
+    const dropdown = document.getElementById('userDropdown');
+    
+    if (wrapper && dropdown) {
+        // Ouverture au survol
+        wrapper.addEventListener('mouseenter', function() {
+            dropdown.classList.add('ouvert');
+        });
+        
+        // Fermeture quand la souris quitte le wrapper
+        wrapper.addEventListener('mouseleave', function(e) {
+            // Vérifier si on ne survole pas un enfant du wrapper
+            if (!wrapper.contains(e.relatedTarget)) {
+                dropdown.classList.remove('ouvert');
+            }
+        });
+        
+        // Fermeture si on clique ailleurs
+        document.addEventListener('click', function(e) {
+            if (!wrapper.contains(e.target)) {
+                dropdown.classList.remove('ouvert');
+            }
+        });
+    }
 });
 </script>
 
