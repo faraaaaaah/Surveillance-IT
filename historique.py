@@ -28,7 +28,12 @@ def maintenant_local() -> datetime:
     systeme du serveur qui execute le code."""
     return datetime.now(FUSEAU_LOCAL).replace(tzinfo=None)
 
-CHEMIN_DB = os.path.join(os.path.dirname(os.path.abspath(__file__)), "historique_anomalies.db")
+# DOSSIER_DATA permet de placer la base sur un volume persistant (PVC sur
+# OpenShift) plutot que dans le dossier du code lui-meme. Sans cette
+# variable d'environnement (ex: en local sur un poste de dev), le
+# comportement est inchange : la base reste a cote de ce fichier.
+DOSSIER_DATA = os.environ.get("DOSSIER_DATA", os.path.dirname(os.path.abspath(__file__)))
+CHEMIN_DB = os.path.join(DOSSIER_DATA, "historique_anomalies.db")
 
 # Si deux anomalies du meme type sur le meme serveur arrivent a moins de
 # ce delai l'une de l'autre, on considere que c'est LE MEME incident qui
