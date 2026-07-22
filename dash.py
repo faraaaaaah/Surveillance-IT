@@ -37,7 +37,7 @@ socketio = SocketIO(app, async_mode="threading", cors_allowed_origins="*")
 
 # Permet aux rappels de notification bureau de verifier l'etat REEL du
 # systeme local (et pas un instantane fige au moment de la 1ere alerte).
-notifier.definir_source_metriques(lambda: (_etat_serveurs.get("local") or {}).get("metriques"))
+notifier.definir_source_metriques(lambda: (_etat_serveurs.get("Serveur-Dashboard-OpenShift") or {}).get("metriques"))
 
 # Cle partagee entre le dashboard et les agents distants (agent.py).
 # A CHANGER en production : export DASHBOARD_API_KEY="quelque-chose-de-solide"
@@ -281,7 +281,7 @@ def api_rapport():
 
 @app.route("/api/historique_metriques")
 def api_historique_metriques():
-    serveur = request.args.get("serveur", "local")
+    serveur = request.args.get("serveur", "Serveur-Dashboard-OpenShift")
     heures = float(request.args.get("heures", 1))
     mesures = historique.recuperer_mesures(serveur, heures=heures)
     incidents = historique.lister_incidents(serveur=serveur)
