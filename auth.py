@@ -323,35 +323,471 @@ def admin_required(fonction):
 auth_bp = Blueprint("auth", __name__)
 
 _PAGE_LOGIN = """
-<!doctype html><html lang="fr"><head><meta charset="utf-8">
-<title>Connexion - Monitoring</title>
+<!doctype html>
+<html lang="fr">
+<head>
+<meta charset="utf-8">
+<title>SENTINEL - Connexion</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
 <style>
-  body{font-family:system-ui,sans-serif;background:#0f1115;color:#e6e6e6;
-       display:flex;align-items:center;justify-content:center;height:100vh;margin:0}
-  form{background:#1a1d24;padding:2rem 2.5rem;border-radius:10px;min-width:280px}
-  h1{font-size:1.2rem;margin:0 0 1.2rem}
-  input{width:100%;padding:.6rem;margin:.4rem 0 1rem;border-radius:6px;
-        border:1px solid #333;background:#0f1115;color:#e6e6e6;box-sizing:border-box}
-  button{width:100%;padding:.6rem;border:0;border-radius:6px;background:#3b82f6;
-         color:#fff;font-weight:600;cursor:pointer}
-  .erreur{color:#f87171;font-size:.9rem;margin-bottom:.8rem}
-  .rappel{background:#1e2530;border:1px solid #2a3a52;border-radius:6px;
-          padding:.7rem .9rem;font-size:.82rem;color:#9aa0aa;margin-bottom:1rem;line-height:1.5}
-  .rappel code{color:#e6e6e6}
-</style></head><body>
-<form method="post">
-  <h1>🔒 Connexion au monitoring</h1>
-  {% if premiere_fois %}
-  <div class="rappel">Premier acces : <code>{{ identifiant_defaut }}</code> /
-  <code>{{ mdp_defaut }}</code><br>Le mot de passe sera a changer immediatement.</div>
-  {% endif %}
-  {% if erreur %}<div class="erreur">{{ erreur }}</div>{% endif %}
-  <label>Identifiant</label>
-  <input name="username" autofocus required>
-  <label>Mot de passe</label>
-  <input name="password" type="password" required>
-  <button type="submit">Se connecter</button>
-</form></body></html>
+  /* === Thème sombre (par défaut) === */
+  :root {
+    --bg-primary: #0B0F14;
+    --bg-secondary: #121820;
+    --bg-card: #161D26;
+    --bg-input: #0B0F14;
+    --border-color: #1E2733;
+    --text-primary: #E6EDF3;
+    --text-secondary: #7C8B99;
+    --text-muted: #4A5A6A;
+    --accent: #58A6FF;
+    --accent-hover: #79C0FF;
+    --success: #3FB950;
+    --danger: #F85149;
+    --warning: #D29922;
+    --shadow: rgba(0,0,0,0.5);
+    --input-bg: #0B0F14;
+    --transition: 0.3s ease;
+  }
+
+  /* === Thème clair === */
+  body.light {
+    --bg-primary: #EBEEF2;
+    --bg-secondary: #F7F8FA;
+    --bg-card: #EFF1F4;
+    --bg-input: #F7F8FA;
+    --border-color: #D8DDE3;
+    --text-primary: #2B3138;
+    --text-secondary: #6B7280;
+    --text-muted: #9AA0A8;
+    --accent: #2563EB;
+    --accent-hover: #3B82F6;
+    --shadow: rgba(0,0,0,0.12);
+    --input-bg: #F7F8FA;
+  }
+
+  * {
+    box-sizing: border-box;
+    margin: 0;
+    padding: 0;
+  }
+
+  body {
+    font-family: 'Inter', system-ui, -apple-system, sans-serif;
+    background: var(--bg-primary);
+    color: var(--text-primary);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    min-height: 100vh;
+    margin: 0;
+    padding: 20px;
+    transition: background var(--transition), color var(--transition);
+  }
+
+  /* === Conteneur principal === */
+  .login-container {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    width: 100%;
+    max-width: 420px;
+    animation: fadeIn 0.6s ease;
+  }
+
+  @keyframes fadeIn {
+    from { opacity: 0; transform: translateY(-20px); }
+    to { opacity: 1; transform: translateY(0); }
+  }
+
+  /* === Logo / En-tête === */
+  .login-header {
+    text-align: center;
+    margin-bottom: 32px;
+  }
+
+  .login-header .logo {
+    font-size: 48px;
+    margin-bottom: 8px;
+    display: block;
+  }
+
+  .login-header h1 {
+    font-size: 26px;
+    font-weight: 700;
+    letter-spacing: -0.5px;
+    color: var(--text-primary);
+  }
+
+  .login-header .subtitle {
+    font-size: 14px;
+    color: var(--text-secondary);
+    margin-top: 4px;
+  }
+
+  /* === Carte de connexion === */
+  .login-card {
+    background: var(--bg-card);
+    border: 1px solid var(--border-color);
+    border-radius: 16px;
+    padding: 36px 32px 32px;
+    width: 100%;
+    box-shadow: 0 8px 40px var(--shadow);
+    transition: background var(--transition), border-color var(--transition), box-shadow var(--transition);
+  }
+
+  /* === Rappel premier accès === */
+  .rappel {
+    background: rgba(88, 166, 255, 0.08);
+    border: 1px solid rgba(88, 166, 255, 0.2);
+    border-radius: 10px;
+    padding: 12px 16px;
+    font-size: 13px;
+    line-height: 1.6;
+    color: var(--text-secondary);
+    margin-bottom: 20px;
+    transition: all var(--transition);
+  }
+
+  .rappel strong {
+    color: var(--accent);
+  }
+
+  .rappel code {
+    background: var(--bg-primary);
+    padding: 2px 8px;
+    border-radius: 4px;
+    font-size: 12px;
+    color: var(--accent);
+    font-family: 'JetBrains Mono', 'Consolas', monospace;
+  }
+
+  .rappel .warning-icon {
+    color: var(--warning);
+    margin-right: 6px;
+  }
+
+  /* === Messages d'erreur === */
+  .erreur {
+    background: rgba(248, 81, 73, 0.1);
+    border: 1px solid rgba(248, 81, 73, 0.25);
+    border-radius: 10px;
+    padding: 10px 14px;
+    font-size: 13px;
+    color: var(--danger);
+    margin-bottom: 16px;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    animation: shake 0.4s ease;
+  }
+
+  @keyframes shake {
+    0%, 100% { transform: translateX(0); }
+    20% { transform: translateX(-6px); }
+    40% { transform: translateX(6px); }
+    60% { transform: translateX(-4px); }
+    80% { transform: translateX(4px); }
+  }
+
+  .erreur .icon {
+    font-size: 18px;
+    flex-shrink: 0;
+  }
+
+  /* === Champs du formulaire === */
+  .form-group {
+    margin-bottom: 18px;
+  }
+
+  .form-group label {
+    display: block;
+    font-size: 13px;
+    font-weight: 500;
+    color: var(--text-secondary);
+    margin-bottom: 6px;
+    letter-spacing: 0.3px;
+  }
+
+  .form-group .input-wrapper {
+    position: relative;
+  }
+
+  .form-group input {
+    width: 100%;
+    padding: 12px 14px;
+    font-size: 15px;
+    font-family: inherit;
+    background: var(--bg-input);
+    border: 1.5px solid var(--border-color);
+    border-radius: 10px;
+    color: var(--text-primary);
+    outline: none;
+    transition: all var(--transition);
+    box-sizing: border-box;
+  }
+
+  .form-group input:focus {
+    border-color: var(--accent);
+    box-shadow: 0 0 0 3px rgba(88, 166, 255, 0.15);
+    background: var(--bg-input);
+  }
+
+  .form-group input::placeholder {
+    color: var(--text-muted);
+    font-size: 14px;
+  }
+
+  .form-group input:-webkit-autofill {
+    -webkit-box-shadow: 0 0 0 1000px var(--bg-input) inset !important;
+    -webkit-text-fill-color: var(--text-primary) !important;
+  }
+
+  /* === Bouton de connexion === */
+  .btn-login {
+    width: 100%;
+    padding: 13px;
+    font-size: 16px;
+    font-weight: 600;
+    font-family: inherit;
+    background: var(--accent);
+    color: #0B0F14;
+    border: none;
+    border-radius: 10px;
+    cursor: pointer;
+    transition: all var(--transition);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 8px;
+    margin-top: 6px;
+  }
+
+  .btn-login:hover {
+    background: var(--accent-hover);
+    transform: translateY(-1px);
+    box-shadow: 0 4px 20px rgba(88, 166, 255, 0.3);
+  }
+
+  .btn-login:active {
+    transform: translateY(0);
+  }
+
+  .btn-login .arrow {
+    transition: transform 0.3s ease;
+  }
+
+  .btn-login:hover .arrow {
+    transform: translateX(4px);
+  }
+
+  /* === Pied de page === */
+  .login-footer {
+    margin-top: 24px;
+    text-align: center;
+    font-size: 13px;
+    color: var(--text-muted);
+    display: flex;
+    justify-content: center;
+    align-items: center;
+    gap: 8px;
+    flex-wrap: wrap;
+  }
+
+  .login-footer .sep {
+    opacity: 0.3;
+  }
+
+  .login-footer .status-dot {
+    display: inline-block;
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    background: var(--success);
+    animation: pulse-dot 2s ease-in-out infinite;
+  }
+
+  @keyframes pulse-dot {
+    0%, 100% { opacity: 0.6; transform: scale(0.9); }
+    50% { opacity: 1; transform: scale(1.1); }
+  }
+
+  /* === Bouton de basculement thème === */
+  .theme-toggle {
+    position: fixed;
+    top: 20px;
+    right: 24px;
+    background: var(--bg-card);
+    border: 1px solid var(--border-color);
+    border-radius: 50%;
+    width: 44px;
+    height: 44px;
+    font-size: 20px;
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    transition: all var(--transition);
+    color: var(--text-secondary);
+    z-index: 100;
+  }
+
+  .theme-toggle:hover {
+    background: var(--border-color);
+    transform: scale(1.05);
+  }
+
+  .theme-toggle .icon-sun { display: none; }
+  .theme-toggle .icon-moon { display: block; }
+
+  body.light .theme-toggle .icon-sun { display: block; }
+  body.light .theme-toggle .icon-moon { display: none; }
+
+  /* === Responsive === */
+  @media (max-width: 480px) {
+    .login-card {
+      padding: 28px 20px 24px;
+    }
+
+    .login-header h1 {
+      font-size: 22px;
+    }
+
+    .login-header .logo {
+      font-size: 38px;
+    }
+
+    .form-group input {
+      font-size: 14px;
+      padding: 10px 12px;
+    }
+
+    .theme-toggle {
+      top: 12px;
+      right: 12px;
+      width: 38px;
+      height: 38px;
+      font-size: 17px;
+    }
+  }
+
+  /* === Scrollbar styling === */
+  ::-webkit-scrollbar {
+    width: 6px;
+  }
+  ::-webkit-scrollbar-track {
+    background: var(--bg-primary);
+  }
+  ::-webkit-scrollbar-thumb {
+    background: var(--border-color);
+    border-radius: 3px;
+  }
+</style>
+</head>
+<body>
+
+<!-- Bouton de basculement thème -->
+<button class="theme-toggle" onclick="basculerTheme()" aria-label="Basculer le thème">
+  <span class="icon-moon">🌙</span>
+  <span class="icon-sun">☀️</span>
+</button>
+
+<div class="login-container">
+  <div class="login-header">
+    <span class="logo">🛡️</span>
+    <h1>SENTINEL</h1>
+    <div class="subtitle">Surveillance infrastructure</div>
+  </div>
+
+  <div class="login-card">
+    <form method="post" action="{{ url_for('auth.login') }}" autocomplete="off">
+      <input type="hidden" name="suivant" value="{{ request.args.get('suivant', '') }}">
+
+      {% if premiere_fois %}
+      <div class="rappel">
+        <span class="warning-icon">ℹ️</span>
+        <strong>Premier accès</strong><br>
+        Identifiant : <code>{{ identifiant_defaut }}</code> &nbsp;·&nbsp;
+        Mot de passe : <code>{{ mdp_defaut }}</code><br>
+        <span style="font-size:12px; color:var(--text-muted);">
+          Le mot de passe devra être changé immédiatement.
+        </span>
+      </div>
+      {% endif %}
+
+      {% if erreur %}
+      <div class="erreur">
+        <span class="icon">⚠️</span>
+        {{ erreur }}
+      </div>
+      {% endif %}
+
+      <div class="form-group">
+        <label for="username">Identifiant</label>
+        <div class="input-wrapper">
+          <input id="username" name="username" type="text" placeholder="votre identifiant" 
+                 value="{{ request.form.get('username', '') }}" required autofocus>
+        </div>
+      </div>
+
+      <div class="form-group">
+        <label for="password">Mot de passe</label>
+        <div class="input-wrapper">
+          <input id="password" name="password" type="password" placeholder="••••••••" required>
+        </div>
+      </div>
+
+      <button type="submit" class="btn-login">
+        Se connecter
+        <span class="arrow">→</span>
+      </button>
+    </form>
+  </div>
+
+  <div class="login-footer">
+    <span class="status-dot"></span>
+    <span>Système opérationnel</span>
+    <span class="sep">·</span>
+    <span>v2.0</span>
+  </div>
+</div>
+
+<script>
+  // === Gestion du thème ===
+  function basculerTheme() {
+    const clair = document.body.classList.toggle('light');
+    localStorage.setItem('sentinel-theme', clair ? 'light' : 'dark');
+  }
+
+  // === Rétablir le thème sauvegardé ===
+  (function initTheme() {
+    if (localStorage.getItem('sentinel-theme') === 'light') {
+      document.body.classList.add('light');
+    }
+  })();
+
+  // === Soumission du formulaire avec la touche Entrée ===
+  document.querySelector('form').addEventListener('keydown', function(e) {
+    if (e.key === 'Enter') {
+      e.preventDefault();
+      this.submit();
+    }
+  });
+
+  // === Focus automatique sur le champ identifiant ===
+  document.addEventListener('DOMContentLoaded', function() {
+    const usernameInput = document.getElementById('username');
+    if (usernameInput) {
+      usernameInput.focus();
+      // Si un nom d'utilisateur est déjà rempli (après erreur), focus sur le mot de passe
+      if (usernameInput.value) {
+        document.getElementById('password').focus();
+      }
+    }
+  });
+</script>
+</body>
+</html>
 """
 
 
@@ -385,29 +821,302 @@ def logout():
 
 
 _PAGE_CHANGER_MDP = """
-<!doctype html><html lang="fr"><head><meta charset="utf-8">
-<title>Changer le mot de passe</title>
+<!doctype html>
+<html lang="fr">
+<head>
+<meta charset="utf-8">
+<title>SENTINEL - Changer le mot de passe</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
 <style>
-  body{font-family:system-ui,sans-serif;background:#0f1115;color:#e6e6e6;
-       display:flex;align-items:center;justify-content:center;height:100vh;margin:0}
-  form{background:#1a1d24;padding:2rem 2.5rem;border-radius:10px;min-width:300px}
-  h1{font-size:1.15rem;margin:0 0 .5rem}
-  p{color:#9aa0aa;font-size:.85rem;margin:0 0 1.2rem}
-  input{width:100%;padding:.6rem;margin:.4rem 0 1rem;border-radius:6px;
-        border:1px solid #333;background:#0f1115;color:#e6e6e6;box-sizing:border-box}
-  button{width:100%;padding:.6rem;border:0;border-radius:6px;background:#3b82f6;
-         color:#fff;font-weight:600;cursor:pointer}
-  .erreur{color:#f87171;font-size:.9rem;margin-bottom:.8rem}
-</style></head><body>
-<form method="post">
-  <h1>🔑 Nouveau mot de passe requis</h1>
-  <p>Premiere connexion (ou mot de passe reinitialise par un admin) :
-  choisissez un mot de passe personnel avant de continuer.</p>
-  {% if erreur %}<div class="erreur">{{ erreur }}</div>{% endif %}
-  <input name="nouveau" type="password" placeholder="nouveau mot de passe (8 caracteres min.)" required>
-  <input name="confirmation" type="password" placeholder="confirmer le mot de passe" required>
-  <button type="submit">Valider</button>
-</form></body></html>
+  /* === Thème sombre (par défaut) === */
+  :root {
+    --bg-primary: #0B0F14;
+    --bg-secondary: #121820;
+    --bg-card: #161D26;
+    --bg-input: #0B0F14;
+    --border-color: #1E2733;
+    --text-primary: #E6EDF3;
+    --text-secondary: #7C8B99;
+    --text-muted: #4A5A6A;
+    --accent: #58A6FF;
+    --accent-hover: #79C0FF;
+    --success: #3FB950;
+    --danger: #F85149;
+    --warning: #D29922;
+    --shadow: rgba(0,0,0,0.5);
+    --input-bg: #0B0F14;
+    --transition: 0.3s ease;
+  }
+
+  /* === Thème clair === */
+  body.light {
+    --bg-primary: #EBEEF2;
+    --bg-secondary: #F7F8FA;
+    --bg-card: #EFF1F4;
+    --bg-input: #F7F8FA;
+    --border-color: #D8DDE3;
+    --text-primary: #2B3138;
+    --text-secondary: #6B7280;
+    --text-muted: #9AA0A8;
+    --accent: #2563EB;
+    --accent-hover: #3B82F6;
+    --shadow: rgba(0,0,0,0.12);
+    --input-bg: #F7F8FA;
+  }
+
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+
+  body {
+    font-family: 'Inter', system-ui, -apple-system, sans-serif;
+    background: var(--bg-primary);
+    color: var(--text-primary);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    min-height: 100vh;
+    margin: 0;
+    padding: 20px;
+    transition: background var(--transition), color var(--transition);
+  }
+
+  .login-container {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    width: 100%;
+    max-width: 420px;
+    animation: fadeIn 0.6s ease;
+  }
+
+  @keyframes fadeIn {
+    from { opacity: 0; transform: translateY(-20px); }
+    to { opacity: 1; transform: translateY(0); }
+  }
+
+  .login-header {
+    text-align: center;
+    margin-bottom: 28px;
+  }
+
+  .login-header .logo { font-size: 42px; display: block; margin-bottom: 6px; }
+  .login-header h1 { font-size: 24px; font-weight: 700; letter-spacing: -0.5px; }
+  .login-header .subtitle { font-size: 14px; color: var(--text-secondary); margin-top: 2px; }
+
+  .login-card {
+    background: var(--bg-card);
+    border: 1px solid var(--border-color);
+    border-radius: 16px;
+    padding: 32px 28px 28px;
+    width: 100%;
+    box-shadow: 0 8px 40px var(--shadow);
+    transition: all var(--transition);
+  }
+
+  .info-text {
+    font-size: 13.5px;
+    color: var(--text-secondary);
+    line-height: 1.6;
+    margin-bottom: 20px;
+    padding: 12px 16px;
+    background: rgba(88, 166, 255, 0.06);
+    border-radius: 10px;
+    border-left: 3px solid var(--accent);
+  }
+
+  .info-text strong { color: var(--accent); }
+
+  .erreur {
+    background: rgba(248, 81, 73, 0.1);
+    border: 1px solid rgba(248, 81, 73, 0.25);
+    border-radius: 10px;
+    padding: 10px 14px;
+    font-size: 13px;
+    color: var(--danger);
+    margin-bottom: 16px;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    animation: shake 0.4s ease;
+  }
+
+  @keyframes shake {
+    0%, 100% { transform: translateX(0); }
+    20% { transform: translateX(-6px); }
+    40% { transform: translateX(6px); }
+    60% { transform: translateX(-4px); }
+    80% { transform: translateX(4px); }
+  }
+
+  .form-group { margin-bottom: 16px; }
+
+  .form-group label {
+    display: block;
+    font-size: 13px;
+    font-weight: 500;
+    color: var(--text-secondary);
+    margin-bottom: 5px;
+    letter-spacing: 0.3px;
+  }
+
+  .form-group input {
+    width: 100%;
+    padding: 12px 14px;
+    font-size: 15px;
+    font-family: inherit;
+    background: var(--bg-input);
+    border: 1.5px solid var(--border-color);
+    border-radius: 10px;
+    color: var(--text-primary);
+    outline: none;
+    transition: all var(--transition);
+    box-sizing: border-box;
+  }
+
+  .form-group input:focus {
+    border-color: var(--accent);
+    box-shadow: 0 0 0 3px rgba(88, 166, 255, 0.15);
+  }
+
+  .btn-login {
+    width: 100%;
+    padding: 13px;
+    font-size: 16px;
+    font-weight: 600;
+    font-family: inherit;
+    background: var(--accent);
+    color: #0B0F14;
+    border: none;
+    border-radius: 10px;
+    cursor: pointer;
+    transition: all var(--transition);
+    margin-top: 4px;
+  }
+
+  .btn-login:hover {
+    background: var(--accent-hover);
+    transform: translateY(-1px);
+    box-shadow: 0 4px 20px rgba(88, 166, 255, 0.3);
+  }
+
+  .btn-login:active { transform: translateY(0); }
+
+  .login-footer {
+    margin-top: 20px;
+    text-align: center;
+    font-size: 13px;
+    color: var(--text-muted);
+  }
+
+  .login-footer a {
+    color: var(--accent);
+    text-decoration: none;
+    transition: color var(--transition);
+  }
+
+  .login-footer a:hover { color: var(--accent-hover); text-decoration: underline; }
+
+  .theme-toggle {
+    position: fixed;
+    top: 20px;
+    right: 24px;
+    background: var(--bg-card);
+    border: 1px solid var(--border-color);
+    border-radius: 50%;
+    width: 44px;
+    height: 44px;
+    font-size: 20px;
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    transition: all var(--transition);
+    color: var(--text-secondary);
+    z-index: 100;
+  }
+
+  .theme-toggle:hover {
+    background: var(--border-color);
+    transform: scale(1.05);
+  }
+
+  .theme-toggle .icon-sun { display: none; }
+  .theme-toggle .icon-moon { display: block; }
+
+  body.light .theme-toggle .icon-sun { display: block; }
+  body.light .theme-toggle .icon-moon { display: none; }
+
+  @media (max-width: 480px) {
+    .login-card { padding: 24px 16px 20px; }
+    .login-header h1 { font-size: 20px; }
+    .theme-toggle { top: 12px; right: 12px; width: 38px; height: 38px; font-size: 17px; }
+  }
+</style>
+</head>
+<body>
+
+<button class="theme-toggle" onclick="basculerTheme()" aria-label="Basculer le thème">
+  <span class="icon-moon">🌙</span>
+  <span class="icon-sun">☀️</span>
+</button>
+
+<div class="login-container">
+  <div class="login-header">
+    <span class="logo">🔑</span>
+    <h1>Nouveau mot de passe</h1>
+    <div class="subtitle">Première connexion ou mot de passe réinitialisé</div>
+  </div>
+
+  <div class="login-card">
+    <div class="info-text">
+      <strong>📌 Important :</strong> Choisissez un mot de passe personnel et sécurisé
+      (8 caractères minimum) avant de continuer.
+    </div>
+
+    {% if erreur %}
+    <div class="erreur">
+      <span>⚠️</span>
+      {{ erreur }}
+    </div>
+    {% endif %}
+
+    <form method="post">
+      <div class="form-group">
+        <label for="nouveau">Nouveau mot de passe</label>
+        <input id="nouveau" name="nouveau" type="password" placeholder="8 caractères minimum" required>
+      </div>
+
+      <div class="form-group">
+        <label for="confirmation">Confirmer le mot de passe</label>
+        <input id="confirmation" name="confirmation" type="password" placeholder="retapez le mot de passe" required>
+      </div>
+
+      <button type="submit" class="btn-login">Valider et continuer →</button>
+    </form>
+  </div>
+
+  <div class="login-footer">
+    <a href="{{ url_for('auth.logout') }}">Se déconnecter</a>
+  </div>
+</div>
+
+<script>
+  function basculerTheme() {
+    document.body.classList.toggle('light');
+    localStorage.setItem('sentinel-theme', document.body.classList.contains('light') ? 'light' : 'dark');
+  }
+
+  (function initTheme() {
+    if (localStorage.getItem('sentinel-theme') === 'light') {
+      document.body.classList.add('light');
+    }
+  })();
+
+  document.addEventListener('DOMContentLoaded', function() {
+    document.getElementById('nouveau').focus();
+  });
+</script>
+</body>
+</html>
 """
 
 
@@ -433,55 +1142,237 @@ _PAGE_ADMIN_USERS = """
 <!doctype html><html lang="fr"><head><meta charset="utf-8">
 <title>Gestion des utilisateurs</title>
 <style>
-  body{font-family:system-ui,sans-serif;background:#0f1115;color:#e6e6e6;padding:2rem;max-width:760px;margin:0 auto}
-  a{color:#3b82f6}
-  table{width:100%;border-collapse:collapse;margin-top:1rem}
-  th,td{padding:.5rem;border-bottom:1px solid #2a2d34;text-align:left}
-  form.inline{display:inline}
-  input,select{padding:.4rem;border-radius:6px;border:1px solid #333;background:#1a1d24;color:#e6e6e6}
-  button{padding:.4rem .8rem;border:0;border-radius:6px;background:#3b82f6;color:#fff;cursor:pointer}
-  .danger{background:#e01e5a}
-  .badge{padding:.1rem .5rem;border-radius:4px;font-size:.8rem}
-  .badge.admin{background:#3b82f6}
-  .badge.user{background:#333}
-  .msg{color:#4ade80;margin-bottom:1rem}
-</style></head><body>
-<p><a href="{{ url_for('accueil') }}">&larr; Retour au dashboard</a></p>
-<h1>Gestion des utilisateurs</h1>
-{% if msg %}<div class="msg">{{ msg }}</div>{% endif %}
+  :root {
+    --bg-primary: #0B0F14;
+    --bg-secondary: #121820;
+    --bg-card: #161D26;
+    --border-color: #1E2733;
+    --text-primary: #E6EDF3;
+    --text-secondary: #7C8B99;
+    --accent: #58A6FF;
+    --accent-hover: #79C0FF;
+    --danger: #F85149;
+    --success: #3FB950;
+    --transition: 0.3s ease;
+  }
 
-<h3>Nouveau compte</h3>
-<form method="post" action="{{ url_for('auth.admin_creer_utilisateur') }}">
-  <input name="username" placeholder="identifiant" required>
-  <input name="password" type="password" placeholder="mot de passe" required>
-  <select name="role"><option value="user">user</option><option value="admin">admin</option></select>
-  <button type="submit">Creer</button>
-</form>
+  body.light {
+    --bg-primary: #EBEEF2;
+    --bg-secondary: #F7F8FA;
+    --bg-card: #EFF1F4;
+    --border-color: #D8DDE3;
+    --text-primary: #2B3138;
+    --text-secondary: #6B7280;
+    --accent: #2563EB;
+    --danger: #CF222E;
+    --success: #1A7F37;
+  }
+
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+
+  body {
+    font-family: 'Inter', system-ui, -apple-system, sans-serif;
+    background: var(--bg-primary);
+    color: var(--text-primary);
+    padding: 2rem;
+    max-width: 900px;
+    margin: 0 auto;
+    transition: background var(--transition), color var(--transition);
+  }
+
+  a { color: var(--accent); text-decoration: none; }
+  a:hover { text-decoration: underline; }
+
+  .header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 1.5rem; flex-wrap: wrap; gap: 12px; }
+  .header h1 { font-size: 1.5rem; }
+
+  .theme-toggle {
+    background: var(--bg-card);
+    border: 1px solid var(--border-color);
+    border-radius: 50%;
+    width: 40px;
+    height: 40px;
+    font-size: 18px;
+    cursor: pointer;
+    transition: all var(--transition);
+    color: var(--text-secondary);
+  }
+
+  .theme-toggle:hover { background: var(--border-color); transform: scale(1.05); }
+
+  .msg {
+    background: rgba(63, 185, 80, 0.1);
+    border: 1px solid rgba(63, 185, 80, 0.2);
+    border-radius: 8px;
+    padding: 10px 14px;
+    color: var(--success);
+    margin-bottom: 1rem;
+  }
+
+  .card {
+    background: var(--bg-card);
+    border: 1px solid var(--border-color);
+    border-radius: 12px;
+    padding: 1.5rem;
+    margin-bottom: 1.5rem;
+    transition: all var(--transition);
+  }
+
+  .card h3 { font-size: 0.9rem; color: var(--text-secondary); text-transform: uppercase; letter-spacing: 0.05em; margin-bottom: 1rem; }
+
+  .form-row {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 10px;
+    align-items: center;
+  }
+
+  .form-row input, .form-row select {
+    padding: 8px 12px;
+    border-radius: 8px;
+    border: 1px solid var(--border-color);
+    background: var(--bg-primary);
+    color: var(--text-primary);
+    font-size: 14px;
+    font-family: inherit;
+    transition: all var(--transition);
+    flex: 1 1 140px;
+  }
+
+  .form-row input:focus, .form-row select:focus {
+    border-color: var(--accent);
+    outline: none;
+    box-shadow: 0 0 0 3px rgba(88, 166, 255, 0.15);
+  }
+
+  .btn {
+    padding: 8px 16px;
+    border: none;
+    border-radius: 8px;
+    font-size: 13px;
+    font-weight: 600;
+    font-family: inherit;
+    cursor: pointer;
+    transition: all var(--transition);
+    background: var(--accent);
+    color: #0B0F14;
+    white-space: nowrap;
+  }
+
+  .btn:hover { background: var(--accent-hover); transform: translateY(-1px); }
+  .btn-danger { background: var(--danger); color: #fff; }
+  .btn-danger:hover { opacity: 0.85; }
+
+  table { width: 100%; border-collapse: collapse; font-size: 14px; }
+  th, td { padding: 10px 8px; border-bottom: 1px solid var(--border-color); text-align: left; }
+  th { color: var(--text-secondary); font-weight: 500; font-size: 12px; text-transform: uppercase; letter-spacing: 0.04em; }
+
+  .badge {
+    padding: 2px 10px;
+    border-radius: 20px;
+    font-size: 11px;
+    font-weight: 600;
+  }
+  .badge-admin { background: rgba(88, 166, 255, 0.2); color: var(--accent); }
+  .badge-user { background: var(--border-color); color: var(--text-secondary); }
+  .badge-warning { background: rgba(210, 153, 34, 0.2); color: #D29922; }
+  .badge-success { background: rgba(63, 185, 80, 0.2); color: var(--success); }
+
+  .actions { display: flex; flex-wrap: wrap; gap: 4px; }
+  .actions .btn { font-size: 11px; padding: 4px 10px; }
+  .actions form { display: inline; }
+
+  @media (max-width: 600px) {
+    body { padding: 1rem; }
+    .form-row { flex-direction: column; }
+    .form-row input, .form-row select { flex: 1 1 100%; }
+    .header { flex-direction: column; align-items: flex-start; }
+    table { font-size: 12px; }
+    th, td { padding: 6px 4px; }
+  }
+</style>
+</head>
+<body>
+
+<div class="header">
+  <div>
+    <h1>👥 Gestion des utilisateurs</h1>
+    <a href="{{ url_for('accueil') }}">← Retour au dashboard</a>
+  </div>
+  <button class="theme-toggle" onclick="basculerTheme()">🌙</button>
+</div>
+
+{% if msg %}<div class="msg">✅ {{ msg }}</div>{% endif %}
+
+<div class="card">
+  <h3>➕ Nouveau compte</h3>
+  <form method="post" action="{{ url_for('auth.admin_creer_utilisateur') }}" class="form-row">
+    <input name="username" placeholder="Identifiant" required>
+    <input name="password" type="password" placeholder="Mot de passe" required>
+    <select name="role">
+      <option value="user">utilisateur</option>
+      <option value="admin">administrateur</option>
+    </select>
+    <button type="submit" class="btn">Créer</button>
+  </form>
+</div>
 
 <table>
-<tr><th>Identifiant</th><th>Role</th><th>Statut</th><th>Cree le</th><th>Actions</th></tr>
-{% for u in utilisateurs %}
-<tr>
-  <td>{{ u.username }}{% if u.doit_changer_mdp %} <span class="badge" style="background:#d97706;">mdp a changer</span>{% endif %}</td>
-  <td><span class="badge {{ u.role }}">{{ u.role }}</span></td>
-  <td>{{ 'actif' if u.actif else 'desactive' }}</td>
-  <td>{{ u.cree_le }}</td>
-  <td>
-    {% if u.username != current_username %}
-    <form class="inline" method="post" action="{{ url_for('auth.admin_changer_role', user_id=u.id) }}">
-      <input type="hidden" name="role" value="{{ 'user' if u.role == 'admin' else 'admin' }}">
-      <button type="submit">Passer {{ 'user' if u.role == 'admin' else 'admin' }}</button>
-    </form>
-    <form class="inline" method="post" action="{{ url_for('auth.admin_toggle_actif', user_id=u.id) }}">
-      <button type="submit" class="danger">{{ 'Desactiver' if u.actif else 'Reactiver' }}</button>
-    </form>
-    {% else %}
-    <em>(vous)</em>
-    {% endif %}
-  </td>
-</tr>
-{% endfor %}
+  <thead>
+    <tr>
+      <th>Identifiant</th>
+      <th>Rôle</th>
+      <th>Statut</th>
+      <th>Créé le</th>
+      <th>Actions</th>
+    </tr>
+  </thead>
+  <tbody>
+    {% for u in utilisateurs %}
+    <tr>
+      <td>
+        {{ u.username }}
+        {% if u.doit_changer_mdp %}
+        <span class="badge badge-warning">mdp à changer</span>
+        {% endif %}
+      </td>
+      <td><span class="badge {{ 'badge-admin' if u.role == 'admin' else 'badge-user' }}">{{ u.role }}</span></td>
+      <td><span class="badge {{ 'badge-success' if u.actif else 'badge-warning' }}">{{ 'actif' if u.actif else 'inactif' }}</span></td>
+      <td>{{ u.cree_le[:10] if u.cree_le else '' }}</td>
+      <td>
+        <div class="actions">
+          {% if u.username != current_username %}
+          <form method="post" action="{{ url_for('auth.admin_changer_role', user_id=u.id) }}">
+            <input type="hidden" name="role" value="{{ 'user' if u.role == 'admin' else 'admin' }}">
+            <button type="submit" class="btn">{{ '⬇ user' if u.role == 'admin' else '⬆ admin' }}</button>
+          </form>
+          <form method="post" action="{{ url_for('auth.admin_toggle_actif', user_id=u.id) }}">
+            <button type="submit" class="btn btn-danger">{{ 'Désactiver' if u.actif else 'Réactiver' }}</button>
+          </form>
+          {% else %}
+          <span style="color:var(--text-secondary); font-size:12px;">(vous)</span>
+          {% endif %}
+        </div>
+      </td>
+    </tr>
+    {% endfor %}
+  </tbody>
 </table>
+
+<script>
+  function basculerTheme() {
+    const clair = document.body.classList.toggle('light');
+    localStorage.setItem('sentinel-theme', clair ? 'light' : 'dark');
+    document.querySelector('.theme-toggle').textContent = clair ? '☀️' : '🌙';
+  }
+
+  (function initTheme() {
+    if (localStorage.getItem('sentinel-theme') === 'light') {
+      document.body.classList.add('light');
+      document.querySelector('.theme-toggle').textContent = '☀️';
+    }
+  })();
+</script>
 </body></html>
 """
 
