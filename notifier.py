@@ -27,6 +27,7 @@ import requests
 from email.mime.text import MIMEText
 from datetime import datetime, timedelta
 from historique import metrique_est_normale, a_une_metrique
+import destinataires
 
 SLACK_WEBHOOK_URL = os.environ.get("SLACK_WEBHOOK_URL", "")
 
@@ -307,22 +308,24 @@ def _envoyer_email(sujet: str, corps: str) -> bool:
     """Envoi SMTP bas niveau. Ne lève JAMAIS d'exception vers l'appelant
     (même règle que Slack/WhatsApp : un souci email ne doit jamais faire
     planter le cycle de surveillance)."""
-    destinataires = [d.strip() for d in EMAIL_DEST.split(",") if d.strip()]
+    liste_destinataires = destinataires.emails_actifs()
+    if not liste_destinataires:
+        return False
     msg = MIMEText(corps, "plain", "utf-8")
     msg["Subject"] = sujet
     msg["From"] = EMAIL_USER
-    msg["To"] = ", ".join(destinataires)
+    msg["To"] = ", ".join(liste_destinataires)
 
     try:
         if EMAIL_PORT == 465:
             with smtplib.SMTP_SSL(EMAIL_HOST, EMAIL_PORT, timeout=10) as serveur:
                 serveur.login(EMAIL_USER, EMAIL_PASSWORD)
-                serveur.sendmail(EMAIL_USER, destinataires, msg.as_string())
+                serveur.sendmail(EMAIL_USER, liste_destinataires, msg.as_string())
         else:
             with smtplib.SMTP(EMAIL_HOST, EMAIL_PORT, timeout=10) as serveur:
                 serveur.starttls()
                 serveur.login(EMAIL_USER, EMAIL_PASSWORD)
-                serveur.sendmail(EMAIL_USER, destinataires, msg.as_string())
+                serveur.sendmail(EMAIL_USER, liste_destinataires, msg.as_string())
         return True
     except Exception as e:
         print(f"⚠️  Échec envoi email : {e}")
@@ -352,9 +355,10 @@ def envoyer_email_alerte(m: dict, anomalies: list[str], explication: str,
     """
     critiques = [a for a in anomalies if a.startswith("🔴")]
 
-    if not (EMAIL_HOST and EMAIL_USER and EMAIL_PASSWORD and EMAIL_DEST):
+    if not (EMAIL_HOST and EMAIL_USER and EMAIL_PASSWORD and destinataires.emails_actifs()):
         if critiques:
-            print("⚠️  Config EMAIL_* incomplète — alerte email ignorée.")
+            print("⚠️  Config EMAIL_* incomplète ou aucun responsable email actif "
+                  "(voir /admin/responsables) — alerte email ignorée.")
         return False
 
     au_moins_un_envoi = False
@@ -436,17 +440,40 @@ _dernier_sms = {}
 _sms_actifs = {}  # Pour suivre les alertes SMS actives
 
 
-def _envoyer_whatsapp(texte: str):
-    """Envoie un message WhatsApp via CallMeBot. Lève une exception si l'envoi échoue."""
+def _envoyer_whatsapp(texte: str, telephone: str = None, apikey: str = None):
+    """Envoie un message WhatsApp via CallMeBot a UN destinataire donne
+    (chaque responsable a sa propre cle CallMeBot — pas de cle partagee).
+    Leve une exception si l'envoi echoue. Repli sur les env vars
+    CALLMEBOT_PHONE/APIKEY si aucun destinataire n'est passe explicitement
+    (compatibilite avec l'ancien comportement / les tests manuels)."""
     import urllib.parse
+    telephone = telephone or CALLMEBOT_PHONE
+    apikey = apikey or CALLMEBOT_APIKEY
     texte_encode = urllib.parse.quote(texte)
     url = (
         f"https://api.callmebot.com/whatsapp.php"
-        f"?phone={CALLMEBOT_PHONE}&text={texte_encode}&apikey={CALLMEBOT_APIKEY}"
+        f"?phone={telephone}&text={texte_encode}&apikey={apikey}"
     )
     resp = requests.get(url, timeout=10)
     if resp.status_code != 200 or "queued" not in resp.text.lower():
         raise requests.RequestException(f"CallMeBot a répondu {resp.status_code} — {resp.text[:200]}")
+
+
+def _envoyer_whatsapp_a_tous(texte: str) -> bool:
+    """Envoie le meme message a tous les responsables WhatsApp actifs
+    (table geree via /admin/responsables, avec repli sur les env vars si la
+    table est vide). Retourne True si au moins un envoi a reussi."""
+    destinataires_wa = destinataires.whatsapp_actifs()
+    if not destinataires_wa:
+        return False
+    au_moins_un_ok = False
+    for d in destinataires_wa:
+        try:
+            _envoyer_whatsapp(texte, d["telephone"], d["apikey"])
+            au_moins_un_ok = True
+        except requests.RequestException as e:
+            print(f"⚠️  Échec envoi WhatsApp vers {d['telephone']} : {e}")
+    return au_moins_un_ok
 
 
 def envoyer_sms_alerte(m: dict, anomalies: list[str], explication: str) -> bool:
@@ -465,9 +492,10 @@ def envoyer_sms_alerte(m: dict, anomalies: list[str], explication: str) -> bool:
         _nettoyer_anomalies_resolues(m)
         _marquer_anomalies_actives(anomalies)
 
-    if not (CALLMEBOT_PHONE and CALLMEBOT_APIKEY):
+    if not destinataires.whatsapp_actifs():
         if critiques:
-            print("⚠️  CALLMEBOT_PHONE / CALLMEBOT_APIKEY non configurés — alerte WhatsApp ignorée.")
+            print("⚠️  Aucun responsable WhatsApp actif (voir /admin/responsables ou "
+                  "CALLMEBOT_PHONE/APIKEY) — alerte WhatsApp ignorée.")
         return False
 
     maintenant = time.time()
@@ -478,12 +506,9 @@ def envoyer_sms_alerte(m: dict, anomalies: list[str], explication: str) -> bool:
     for cle in [c for c in list(_sms_actifs) if _est_anomalie_resolue(c, m)]:
         _sms_actifs.pop(cle, None)
         texte = f"✅ ALERTE RÉSOLUE ({cle}) {m['timestamp']}\nCPU: {m['cpu']}%\nMémoire: {m['memoire']}%"
-        try:
-            _envoyer_whatsapp(texte)
+        if _envoyer_whatsapp_a_tous(texte):
             print(f"📱 Alerte WhatsApp de résolution envoyée ({cle}).")
             au_moins_un_envoi = True
-        except Exception:
-            pass
 
     if not critiques:
         return au_moins_un_envoi
@@ -508,16 +533,13 @@ def envoyer_sms_alerte(m: dict, anomalies: list[str], explication: str) -> bool:
         + "\n".join(critiques)
         + f"\n{explication[:300]}"
     )
-    try:
-        _envoyer_whatsapp(texte)
+    if _envoyer_whatsapp_a_tous(texte):
         for cle in types_a_notifier:
             _dernier_sms[cle] = maintenant
             _sms_actifs[cle] = datetime.now()
         print("📱 Alerte WhatsApp envoyée.")
         return True
-    except requests.RequestException as e:
-        print(f"⚠️  Échec envoi WhatsApp (réseau) : {e}")
-        return au_moins_un_envoi
+    return au_moins_un_envoi
 
 
 # ---------------------------------------------------------------------------

@@ -22,8 +22,9 @@ import time
 from collections import deque
 from datetime import datetime
 
-from flask import Flask, jsonify, request, send_file
+from flask import Flask, jsonify, request, send_file, url_for
 from flask_socketio import SocketIO
+from flask_login import current_user, login_required
 
 from monitoring_core import lire_metriques, detecter_anomalies, expliquer, expliquer_par_type
 import notifier
@@ -31,8 +32,30 @@ from notifier import envoyer_alerte_slack, envoyer_sms_alerte, envoyer_email_ale
 import historique
 from rapport_pdf import lancer_planificateur_en_arriere_plan, generer_rapport
 from chatbot import repondre_question
+import auth
+from destinataires import destinataires_bp
 
 app = Flask(__name__)
+# Cle de session generee et sauvegardee automatiquement (voir auth.py) : pas
+# de variable d'environnement a definir, stable au fil des redemarrages du
+# pod tant que le PVC reste attache.
+app.secret_key = auth.obtenir_secret_key()
+auth.init_login_manager(app)
+auth.bootstrap_admin_auto()
+app.register_blueprint(auth.auth_bp)
+app.register_blueprint(destinataires_bp)
+
+
+@app.before_request
+def _proteger_routes():
+    # /api/ingest reste protegee par CLE_API (machine-a-machine, pas de
+    # session utilisateur possible pour un agent distant) : on la laisse
+    # passer ici, sa propre verification de cle est faite dans la route.
+    if request.endpoint == "api_ingest":
+        return None
+    return auth.verifier_acces()
+
+
 socketio = SocketIO(app, async_mode="threading", cors_allowed_origins="*")
 
 # Permet aux rappels de notification bureau de verifier l'etat REEL du
@@ -306,12 +329,32 @@ def api_chat():
 
 
 @app.route("/")
+@login_required
 def accueil():
-    return PAGE_HTML
+    liens_admin = ""
+    if current_user.is_admin:
+        liens_admin = (
+            f'<a class="btn-periode" style="padding:7px 12px;text-decoration:none;" '
+            f'href="{url_for("auth.admin_utilisateurs")}">👤 Utilisateurs</a>'
+            f'<a class="btn-periode" style="padding:7px 12px;text-decoration:none;" '
+            f'href="{url_for("destinataires.page_responsables")}">📣 Responsables</a>'
+        )
+    barre = (
+        f'<span style="color:var(--muted); font-size:13px;">{current_user.username}</span>'
+        f'{liens_admin}'
+        f'<a class="btn-periode" style="padding:7px 12px;text-decoration:none;" '
+        f'href="{url_for("auth.logout")}">🚪 Deconnexion</a>'
+    )
+    return PAGE_HTML.replace("<!--__BARRE_UTILISATEUR__-->", barre)
 
 
 @socketio.on("connect")
 def on_connect():
+    # Le handshake WebSocket partage le cookie de session Flask : on peut
+    # donc verifier ici aussi que l'utilisateur est bien connecte, sinon
+    # les donnees temps reel fuiteraient meme avec les routes HTTP protegees.
+    if not current_user.is_authenticated:
+        return False  # refuse la connexion socket.io
     with _verrou:
         socketio.emit("etat_initial", {
             nom: {
@@ -480,6 +523,7 @@ PAGE_HTML = """
         <button class="btn-periode" onclick="ouvrirHistorique()" style="padding:7px 12px;">🕘 Historique</button>
         <button class="btn-periode" id="btn-theme" onclick="basculerTheme()" style="padding:7px 10px;">🌙</button>
         <div id="horloge">--:--:--</div>
+        <!--__BARRE_UTILISATEUR__-->
       </div>
     </header>
 
