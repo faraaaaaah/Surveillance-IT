@@ -167,7 +167,7 @@ def boucle_surveillance_locale():
             # arrière-plan par traiter_mesure (voir sa docstring) : ce cycle
             # reste rapide (lecture métriques + push dashboard uniquement),
             # peu importe le nombre d'anomalies en cours.
-            traiter_mesure("local", m, anomalies)
+            traiter_mesure("Serveur-Dashboard-OpenShift", m, anomalies)
         except Exception as e:
             # Filet de securite : une erreur ponctuelle (Ollama, reseau, DB...)
             # ne doit JAMAIS arreter definitivement la surveillance.
