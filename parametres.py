@@ -147,7 +147,7 @@ _PAGE = """
 
 <div class="statut {{ 'ok' if complete else 'manquant' }}">
   {{ 'Configuration email active — les alertes peuvent partir.' if complete
-     else 'Aucune configuration email valide pour le moment — les alertes email ne partiront pas tant que ce formulaire n'est pas rempli.' }}
+     else "Aucune configuration email valide pour le moment — les alertes email ne partiront pas tant que ce formulaire n'est pas rempli." }}
 </div>
 
 <form method="post" action="{{ url_for('parametres.enregistrer_route') }}">
