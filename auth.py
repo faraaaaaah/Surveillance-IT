@@ -317,477 +317,297 @@ def admin_required(fonction):
 
 
 # ---------------------------------------------------------------------------
+# Design partage — jetons de style, theme clair/sombre, menu utilisateur
+# ---------------------------------------------------------------------------
+# Ces blocs (CSS/JS/HTML) sont reutilises par TOUTES les pages "back-office"
+# (connexion, gestion des utilisateurs, gestion des responsables) ET par le
+# dashboard (dash.py), pour garder un rendu identique partout — memes
+# variables de couleur que dash.py, meme cle localStorage 'sentinel-theme'.
+
+TOKENS_CSS = """
+  :root{
+    --bg:#0B0F14; --panel:#121820; --panel2:#161D26; --border:#1E2733;
+    --text:#E6EDF3; --muted:#7C8B99;
+    --ok:#3FB950; --warn:#D29922; --crit:#F85149; --accent:#58A6FF;
+  }
+  body.light{
+    --bg:#EBEEF2; --panel:#F7F8FA; --panel2:#EFF1F4; --border:#D8DDE3;
+    --text:#2B3138; --muted:#6B7280;
+    --ok:#1A7F37; --warn:#9A6700; --crit:#CF222E; --accent:#2563EB;
+  }
+  *{box-sizing:border-box;}
+  body{margin:0; font-family:Inter,system-ui,-apple-system,sans-serif; background:var(--bg);
+       color:var(--text); transition:background-color .2s, color .2s;}
+  a{color:var(--accent); text-decoration:none;}
+
+  .topbar{display:flex; align-items:center; justify-content:space-between; gap:16px;
+          padding:14px 28px; background:var(--panel); border-bottom:1px solid var(--border);}
+  .topbar-left{display:flex; align-items:center; gap:26px;}
+  .topbar-logo{display:flex; align-items:center; gap:9px; font-weight:700; font-size:15px; letter-spacing:.04em;}
+  .topbar-nav{display:flex; gap:4px;}
+  .topbar-nav a{color:var(--muted); font-size:13px; padding:7px 12px; border-radius:6px;}
+  .topbar-nav a:hover{background:var(--panel2); color:var(--text);}
+  .topbar-nav a.actif{background:rgba(88,166,255,.12); color:var(--accent); font-weight:600;}
+  .topbar-right{display:flex; align-items:center; gap:10px;}
+
+  .btn-icone{background:transparent; border:1px solid var(--border); color:var(--muted);
+             font-size:13px; padding:7px 10px; border-radius:6px; cursor:pointer;}
+  .btn-icone:hover{color:var(--text); border-color:var(--muted);}
+
+  /* Menu utilisateur (avatar + nom + menu deroulant) ------------------- */
+  .menu-user{position:relative;}
+  .menu-user-btn{display:flex; align-items:center; gap:8px; background:transparent; border:1px solid var(--border);
+                 border-radius:20px; padding:5px 12px 5px 5px; cursor:pointer; color:var(--text); font-size:13px;}
+  .menu-user-btn:hover{border-color:var(--muted);}
+  .menu-user .avatar{width:26px; height:26px; border-radius:50%; background:var(--accent); color:#08131f;
+                      display:flex; align-items:center; justify-content:center; font-weight:700; font-size:12px; flex-shrink:0;}
+  .menu-user .chevron{color:var(--muted); font-size:10px; transition:transform .15s;}
+  .menu-user.ouvert .chevron{transform:rotate(180deg);}
+  .menu-user-dropdown{display:none; position:absolute; top:calc(100% + 8px); right:0; min-width:220px;
+                       background:var(--panel); border:1px solid var(--border); border-radius:10px;
+                       box-shadow:0 10px 30px rgba(0,0,0,.3); z-index:200; overflow:hidden;}
+  .menu-user.ouvert .menu-user-dropdown{display:block;}
+  .menu-user-info{padding:12px 14px; border-bottom:1px solid var(--border);}
+  .menu-user-info .nom{font-weight:600; font-size:13.5px;}
+  .menu-user-info .role{display:inline-block; margin-top:4px; font-size:10.5px; padding:2px 8px; border-radius:10px;
+                          background:rgba(88,166,255,.15); color:var(--accent); text-transform:uppercase; letter-spacing:.04em;}
+  .menu-user-dropdown a, .menu-user-dropdown .item{display:flex; align-items:center; gap:9px; padding:10px 14px;
+                          font-size:13px; color:var(--text); cursor:pointer;}
+  .menu-user-dropdown a:hover, .menu-user-dropdown .item:hover{background:var(--panel2);}
+  .menu-user-dropdown .item.danger{color:var(--crit);}
+  .menu-user-dropdown .separateur{height:1px; background:var(--border); margin:4px 0;}
+
+  main.contenu{max-width:1000px; margin:0 auto; padding:28px;}
+  .page-entete{margin-bottom:22px;}
+  .page-entete h1{font-size:20px; margin:0 0 4px;}
+  .page-entete p{color:var(--muted); font-size:13px; margin:0;}
+
+  .carte{background:var(--panel); border:1px solid var(--border); border-radius:12px; padding:22px; margin-bottom:20px;}
+  .carte h3{margin:0 0 4px; font-size:14px;}
+  .carte .aide-carte{color:var(--muted); font-size:12.5px; margin:0 0 16px;}
+
+  .champs-form{display:flex; flex-wrap:wrap; gap:12px; align-items:flex-end;}
+  .champ{display:flex; flex-direction:column; gap:5px; flex:1; min-width:160px;}
+  .champ label{font-size:11.5px; color:var(--muted); text-transform:uppercase; letter-spacing:.04em;}
+  input, select{padding:.55rem .7rem; border-radius:7px; border:1px solid var(--border); background:var(--bg);
+                color:var(--text); font-size:13.5px;}
+  input:focus, select:focus{outline:none; border-color:var(--accent);}
+  button{font-family:inherit;}
+  .btn-principal{padding:.6rem 1.1rem; border:0; border-radius:7px; background:var(--accent); color:#08131f;
+                 font-weight:600; font-size:13.5px; cursor:pointer;}
+  .btn-principal:hover{filter:brightness(1.08);}
+  .btn-fantome{padding:.5rem .9rem; border:1px solid var(--border); border-radius:7px; background:transparent;
+               color:var(--text); font-size:12.5px; cursor:pointer;}
+  .btn-fantome:hover{border-color:var(--muted);}
+  .btn-danger{padding:.5rem .9rem; border:1px solid rgba(248,81,73,.4); border-radius:7px; background:rgba(248,81,73,.1);
+              color:var(--crit); font-size:12.5px; cursor:pointer;}
+  .btn-danger:hover{background:rgba(248,81,73,.18);}
+
+  table.table-pro{width:100%; border-collapse:collapse; font-size:13px;}
+  table.table-pro th{text-align:left; color:var(--muted); font-size:11px; text-transform:uppercase; letter-spacing:.05em;
+                      padding:10px 12px; border-bottom:1px solid var(--border);}
+  table.table-pro td{padding:11px 12px; border-bottom:1px solid var(--border); vertical-align:middle;}
+  table.table-pro tr:last-child td{border-bottom:none;}
+  table.table-pro tr:hover td{background:var(--panel2);}
+  .cellule-nom{display:flex; align-items:center; gap:10px;}
+  .cellule-nom .avatar{width:30px; height:30px; font-size:12px;}
+  .badge{display:inline-block; font-size:10.5px; padding:2px 9px; border-radius:10px; font-weight:600; text-transform:uppercase; letter-spacing:.03em;}
+  .badge.admin{background:rgba(88,166,255,.15); color:var(--accent);}
+  .badge.user{background:var(--panel2); color:var(--muted); border:1px solid var(--border);}
+  .badge.actif{background:rgba(63,185,80,.15); color:var(--ok);}
+  .badge.inactif{background:rgba(248,81,73,.12); color:var(--crit);}
+  .badge.attention{background:rgba(210,153,34,.15); color:var(--warn);}
+  .actions-ligne{display:flex; gap:6px; flex-wrap:wrap;}
+  .recherche{max-width:280px;}
+  .toast{background:rgba(63,185,80,.12); border:1px solid rgba(63,185,80,.35); color:var(--ok);
+         padding:10px 16px; border-radius:8px; font-size:13px; margin-bottom:18px;}
+  .vide-etat{text-align:center; color:var(--muted); font-size:13px; padding:30px 0;}
+"""
+
+JS_TEMA_ET_MENU = """
+function basculerTheme(){
+  const clair = document.body.classList.toggle('light');
+  localStorage.setItem('sentinel-theme', clair ? 'light' : 'dark');
+  const btn = document.getElementById('btn-theme');
+  if(btn) btn.textContent = clair ? '☀️' : '🌙';
+}
+(function initTheme(){
+  if(localStorage.getItem('sentinel-theme') === 'light'){
+    document.body.classList.add('light');
+    document.addEventListener('DOMContentLoaded', () => {
+      const btn = document.getElementById('btn-theme');
+      if(btn) btn.textContent = '☀️';
+    });
+  }
+})();
+
+// Menu utilisateur : ouverture au clic OU au survol, fermeture au clic
+// exterieur ou quand la souris quitte la zone (avec un court delai pour
+// eviter une fermeture intempestive en passant d'un element a l'autre).
+(function(){
+  let delaiFermeture = null;
+  document.addEventListener('DOMContentLoaded', () => {
+    const menu = document.getElementById('menu-utilisateur');
+    if(!menu) return;
+    const bouton = menu.querySelector('.menu-user-btn');
+    const ouvrir = () => { clearTimeout(delaiFermeture); menu.classList.add('ouvert'); };
+    const fermer = () => { delaiFermeture = setTimeout(() => menu.classList.remove('ouvert'), 220); };
+    bouton.addEventListener('click', (e) => { e.stopPropagation(); menu.classList.toggle('ouvert'); });
+    menu.addEventListener('mouseenter', ouvrir);
+    menu.addEventListener('mouseleave', fermer);
+    document.addEventListener('click', (e) => { if(!menu.contains(e.target)) menu.classList.remove('ouvert'); });
+  });
+})();
+"""
+
+
+def render_menu_utilisateur(page_active: str = None) -> str:
+    """HTML du bloc "avatar + nom + menu deroulant" affiche en haut a droite
+    (profil, liens admin, deconnexion). Utilise par dash.py ET par les pages
+    de ce module — un seul et meme composant, pour un rendu identique partout.
+    A appeler dans le contexte d'une requete authentifiee (current_user)."""
+    initiale = (current_user.username or "?")[0].upper()
+    liens_admin = ""
+    if current_user.is_admin:
+        liens_admin = (
+            f'<a href="{url_for("auth.admin_utilisateurs")}" class="item">👤 Utilisateurs</a>'
+            f'<a href="{url_for("destinataires.page_responsables")}" class="item">📣 Responsables</a>'
+            f'<a href="{url_for("parametres.page_parametres")}" class="item">✉️ Email</a>'
+            f'<div class="separateur"></div>'
+        )
+    return f"""
+    <div class="menu-user" id="menu-utilisateur">
+      <button class="menu-user-btn" type="button">
+        <span class="avatar">{initiale}</span>
+        <span class="username">{current_user.username}</span>
+        <span class="chevron">▾</span>
+      </button>
+      <div class="menu-user-dropdown">
+        <div class="menu-user-info">
+          <div class="nom">{current_user.username}</div>
+          <span class="role">{'Administrateur' if current_user.is_admin else 'Utilisateur'}</span>
+        </div>
+        <a href="{url_for('auth.changer_mot_de_passe_route')}" class="item">🔑 Mon profil</a>
+        <div class="separateur"></div>
+        {liens_admin}
+        <a href="{url_for('auth.logout')}" class="item danger">🚪 Deconnexion</a>
+      </div>
+    </div>
+    """
+
+
+def render_topbar(page_active: str) -> str:
+    """Barre superieure commune aux pages d'administration (utilisateurs,
+    responsables) : logo, navigation, theme, menu utilisateur."""
+    def cls(nom):
+        return "actif" if nom == page_active else ""
+    return f"""
+    <header class="topbar">
+      <div class="topbar-left">
+        <div class="topbar-logo">🛡️ SENTINEL</div>
+        <nav class="topbar-nav">
+          <a href="{url_for('accueil')}" class="{cls('dashboard')}">Tableau de bord</a>
+          <a href="{url_for('auth.admin_utilisateurs')}" class="{cls('utilisateurs')}">Utilisateurs</a>
+          <a href="{url_for('destinataires.page_responsables')}" class="{cls('responsables')}">Responsables</a>
+          <a href="{url_for('parametres.page_parametres')}" class="{cls('parametres')}">Email</a>
+        </nav>
+      </div>
+      <div class="topbar-right">
+        <button class="btn-icone" id="btn-theme" onclick="basculerTheme()">🌙</button>
+        {render_menu_utilisateur(page_active)}
+      </div>
+    </header>
+    """
+
+
+# ---------------------------------------------------------------------------
 # Routes (Blueprint)
 # ---------------------------------------------------------------------------
 
 auth_bp = Blueprint("auth", __name__)
 
 _PAGE_LOGIN = """
-<!doctype html>
-<html lang="fr">
-<head>
-<meta charset="utf-8">
-<title>SENTINEL - Connexion</title>
+<!doctype html><html lang="fr"><head><meta charset="utf-8">
+<title>Connexion - SENTINEL</title>
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <style>
-  /* === Thème sombre (par défaut) === */
-  :root {
-    --bg-primary: #0B0F14;
-    --bg-secondary: #121820;
-    --bg-card: #161D26;
-    --bg-input: #0B0F14;
-    --border-color: #1E2733;
-    --text-primary: #E6EDF3;
-    --text-secondary: #7C8B99;
-    --text-muted: #4A5A6A;
-    --accent: #58A6FF;
-    --accent-hover: #79C0FF;
-    --success: #3FB950;
-    --danger: #F85149;
-    --warning: #D29922;
-    --shadow: rgba(0,0,0,0.5);
-    --input-bg: #0B0F14;
-    --transition: 0.3s ease;
-  }
+""" + TOKENS_CSS + """
+  html,body{height:100%;}
+  .auth-shell{display:flex; min-height:100vh;}
+  .auth-brand{flex:1; display:flex; flex-direction:column; justify-content:center; gap:22px;
+              padding:60px; background:
+                radial-gradient(circle at 20% 20%, rgba(88,166,255,.18), transparent 45%),
+                radial-gradient(circle at 80% 80%, rgba(88,166,255,.10), transparent 50%),
+                var(--panel);
+              border-right:1px solid var(--border); position:relative; overflow:hidden;}
+  .auth-brand .marque{display:flex; align-items:center; gap:12px; font-size:26px; font-weight:800; letter-spacing:.03em;}
+  .auth-brand .marque .pastille{width:14px; height:14px; border-radius:50%; background:var(--ok);
+                                 box-shadow:0 0 0 4px rgba(63,185,80,.18);}
+  .auth-brand h2{font-size:15px; font-weight:500; color:var(--muted); margin:0; max-width:340px; line-height:1.6;}
+  .auth-brand ul{list-style:none; padding:0; margin:10px 0 0; display:flex; flex-direction:column; gap:14px; max-width:340px;}
+  .auth-brand li{display:flex; align-items:flex-start; gap:10px; font-size:13px; color:var(--text); line-height:1.5;}
+  .auth-brand li .puce{width:22px; height:22px; border-radius:6px; background:rgba(88,166,255,.14); color:var(--accent);
+                        display:flex; align-items:center; justify-content:center; flex-shrink:0; font-size:12px; margin-top:1px;}
 
-  /* === Thème clair === */
-  body.light {
-    --bg-primary: #EBEEF2;
-    --bg-secondary: #F7F8FA;
-    --bg-card: #EFF1F4;
-    --bg-input: #F7F8FA;
-    --border-color: #D8DDE3;
-    --text-primary: #2B3138;
-    --text-secondary: #6B7280;
-    --text-muted: #9AA0A8;
-    --accent: #2563EB;
-    --accent-hover: #3B82F6;
-    --shadow: rgba(0,0,0,0.12);
-    --input-bg: #F7F8FA;
-  }
-
-  * {
-    box-sizing: border-box;
-    margin: 0;
-    padding: 0;
-  }
-
-  body {
-    font-family: 'Inter', system-ui, -apple-system, sans-serif;
-    background: var(--bg-primary);
-    color: var(--text-primary);
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    min-height: 100vh;
-    margin: 0;
-    padding: 20px;
-    transition: background var(--transition), color var(--transition);
-  }
-
-  /* === Conteneur principal === */
-  .login-container {
-    display: flex;
-    flex-direction: column;
-    align-items: center;
-    width: 100%;
-    max-width: 420px;
-    animation: fadeIn 0.6s ease;
-  }
-
-  @keyframes fadeIn {
-    from { opacity: 0; transform: translateY(-20px); }
-    to { opacity: 1; transform: translateY(0); }
-  }
-
-  /* === Logo / En-tête === */
-  .login-header {
-    text-align: center;
-    margin-bottom: 32px;
-  }
-
-  .login-header .logo {
-    font-size: 48px;
-    margin-bottom: 8px;
-    display: block;
-  }
-
-  .login-header h1 {
-    font-size: 26px;
-    font-weight: 700;
-    letter-spacing: -0.5px;
-    color: var(--text-primary);
-  }
-
-  .login-header .subtitle {
-    font-size: 14px;
-    color: var(--text-secondary);
-    margin-top: 4px;
-  }
-
-  /* === Carte de connexion === */
-  .login-card {
-    background: var(--bg-card);
-    border: 1px solid var(--border-color);
-    border-radius: 16px;
-    padding: 36px 32px 32px;
-    width: 100%;
-    box-shadow: 0 8px 40px var(--shadow);
-    transition: background var(--transition), border-color var(--transition), box-shadow var(--transition);
-  }
-
-  /* === Rappel premier accès === */
-  .rappel {
-    background: rgba(88, 166, 255, 0.08);
-    border: 1px solid rgba(88, 166, 255, 0.2);
-    border-radius: 10px;
-    padding: 12px 16px;
-    font-size: 13px;
-    line-height: 1.6;
-    color: var(--text-secondary);
-    margin-bottom: 20px;
-    transition: all var(--transition);
-  }
-
-  .rappel strong {
-    color: var(--accent);
-  }
-
-  .rappel code {
-    background: var(--bg-primary);
-    padding: 2px 8px;
-    border-radius: 4px;
-    font-size: 12px;
-    color: var(--accent);
-    font-family: 'JetBrains Mono', 'Consolas', monospace;
-  }
-
-  .rappel .warning-icon {
-    color: var(--warning);
-    margin-right: 6px;
-  }
-
-  /* === Messages d'erreur === */
-  .erreur {
-    background: rgba(248, 81, 73, 0.1);
-    border: 1px solid rgba(248, 81, 73, 0.25);
-    border-radius: 10px;
-    padding: 10px 14px;
-    font-size: 13px;
-    color: var(--danger);
-    margin-bottom: 16px;
-    display: flex;
-    align-items: center;
-    gap: 8px;
-    animation: shake 0.4s ease;
-  }
-
-  @keyframes shake {
-    0%, 100% { transform: translateX(0); }
-    20% { transform: translateX(-6px); }
-    40% { transform: translateX(6px); }
-    60% { transform: translateX(-4px); }
-    80% { transform: translateX(4px); }
-  }
-
-  .erreur .icon {
-    font-size: 18px;
-    flex-shrink: 0;
-  }
-
-  /* === Champs du formulaire === */
-  .form-group {
-    margin-bottom: 18px;
-  }
-
-  .form-group label {
-    display: block;
-    font-size: 13px;
-    font-weight: 500;
-    color: var(--text-secondary);
-    margin-bottom: 6px;
-    letter-spacing: 0.3px;
-  }
-
-  .form-group .input-wrapper {
-    position: relative;
-  }
-
-  .form-group input {
-    width: 100%;
-    padding: 12px 14px;
-    font-size: 15px;
-    font-family: inherit;
-    background: var(--bg-input);
-    border: 1.5px solid var(--border-color);
-    border-radius: 10px;
-    color: var(--text-primary);
-    outline: none;
-    transition: all var(--transition);
-    box-sizing: border-box;
-  }
-
-  .form-group input:focus {
-    border-color: var(--accent);
-    box-shadow: 0 0 0 3px rgba(88, 166, 255, 0.15);
-    background: var(--bg-input);
-  }
-
-  .form-group input::placeholder {
-    color: var(--text-muted);
-    font-size: 14px;
-  }
-
-  .form-group input:-webkit-autofill {
-    -webkit-box-shadow: 0 0 0 1000px var(--bg-input) inset !important;
-    -webkit-text-fill-color: var(--text-primary) !important;
-  }
-
-  /* === Bouton de connexion === */
-  .btn-login {
-    width: 100%;
-    padding: 13px;
-    font-size: 16px;
-    font-weight: 600;
-    font-family: inherit;
-    background: var(--accent);
-    color: #0B0F14;
-    border: none;
-    border-radius: 10px;
-    cursor: pointer;
-    transition: all var(--transition);
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    gap: 8px;
-    margin-top: 6px;
-  }
-
-  .btn-login:hover {
-    background: var(--accent-hover);
-    transform: translateY(-1px);
-    box-shadow: 0 4px 20px rgba(88, 166, 255, 0.3);
-  }
-
-  .btn-login:active {
-    transform: translateY(0);
-  }
-
-  .btn-login .arrow {
-    transition: transform 0.3s ease;
-  }
-
-  .btn-login:hover .arrow {
-    transform: translateX(4px);
-  }
-
-  /* === Pied de page === */
-  .login-footer {
-    margin-top: 24px;
-    text-align: center;
-    font-size: 13px;
-    color: var(--text-muted);
-    display: flex;
-    justify-content: center;
-    align-items: center;
-    gap: 8px;
-    flex-wrap: wrap;
-  }
-
-  .login-footer .sep {
-    opacity: 0.3;
-  }
-
-  .login-footer .status-dot {
-    display: inline-block;
-    width: 8px;
-    height: 8px;
-    border-radius: 50%;
-    background: var(--success);
-    animation: pulse-dot 2s ease-in-out infinite;
-  }
-
-  @keyframes pulse-dot {
-    0%, 100% { opacity: 0.6; transform: scale(0.9); }
-    50% { opacity: 1; transform: scale(1.1); }
-  }
-
-  /* === Bouton de basculement thème === */
-  .theme-toggle {
-    position: fixed;
-    top: 20px;
-    right: 24px;
-    background: var(--bg-card);
-    border: 1px solid var(--border-color);
-    border-radius: 50%;
-    width: 44px;
-    height: 44px;
-    font-size: 20px;
-    cursor: pointer;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    transition: all var(--transition);
-    color: var(--text-secondary);
-    z-index: 100;
-  }
-
-  .theme-toggle:hover {
-    background: var(--border-color);
-    transform: scale(1.05);
-  }
-
-  .theme-toggle .icon-sun { display: none; }
-  .theme-toggle .icon-moon { display: block; }
-
-  body.light .theme-toggle .icon-sun { display: block; }
-  body.light .theme-toggle .icon-moon { display: none; }
-
-  /* === Responsive === */
-  @media (max-width: 480px) {
-    .login-card {
-      padding: 28px 20px 24px;
-    }
-
-    .login-header h1 {
-      font-size: 22px;
-    }
-
-    .login-header .logo {
-      font-size: 38px;
-    }
-
-    .form-group input {
-      font-size: 14px;
-      padding: 10px 12px;
-    }
-
-    .theme-toggle {
-      top: 12px;
-      right: 12px;
-      width: 38px;
-      height: 38px;
-      font-size: 17px;
-    }
-  }
-
-  /* === Scrollbar styling === */
-  ::-webkit-scrollbar {
-    width: 6px;
-  }
-  ::-webkit-scrollbar-track {
-    background: var(--bg-primary);
-  }
-  ::-webkit-scrollbar-thumb {
-    background: var(--border-color);
-    border-radius: 3px;
-  }
-</style>
-</head>
+  .auth-form-wrap{flex:1; display:flex; align-items:center; justify-content:center; padding:40px; position:relative;}
+  .theme-toggle{position:absolute; top:24px; right:24px;}
+  .auth-card{background:var(--panel); border:1px solid var(--border); border-radius:14px; padding:36px 38px;
+             width:100%; max-width:360px; box-shadow:0 20px 60px rgba(0,0,0,.25);}
+  .auth-card h1{font-size:19px; margin:0 0 4px;}
+  .auth-card .sous{color:var(--muted); font-size:13px; margin:0 0 22px;}
+  .champ-auth{margin-bottom:16px;}
+  .champ-auth label{display:block; font-size:11.5px; color:var(--muted); text-transform:uppercase;
+                     letter-spacing:.04em; margin-bottom:6px;}
+  .champ-auth input{width:100%;}
+  .btn-connexion{width:100%; padding:.7rem; margin-top:6px; border:0; border-radius:8px; background:var(--accent);
+                 color:#08131f; font-weight:700; font-size:14px; cursor:pointer;}
+  .btn-connexion:hover{filter:brightness(1.08);}
+  .erreur{background:rgba(248,81,73,.1); border:1px solid rgba(248,81,73,.35); color:var(--crit);
+          font-size:12.5px; padding:9px 12px; border-radius:7px; margin-bottom:14px;}
+  .rappel{background:rgba(88,166,255,.08); border:1px solid rgba(88,166,255,.3); border-radius:8px;
+          padding:.8rem 1rem; font-size:.8rem; color:var(--muted); margin-bottom:18px; line-height:1.55;}
+  .rappel code{color:var(--text); background:var(--panel2); padding:1px 6px; border-radius:4px;}
+  @media (max-width: 860px){ .auth-brand{display:none;} }
+</style></head>
 <body>
+<script>(function(){ if(localStorage.getItem('sentinel-theme') === 'light'){ document.body.classList.add('light'); } })();</script>
 
-<!-- Bouton de basculement thème -->
-<button class="theme-toggle" onclick="basculerTheme()" aria-label="Basculer le thème">
-  <span class="icon-moon">🌙</span>
-  <span class="icon-sun">☀️</span>
-</button>
-
-<div class="login-container">
-  <div class="login-header">
-    <span class="logo">🛡️</span>
-    <h1>SENTINEL</h1>
-    <div class="subtitle">Surveillance infrastructure</div>
+<div class="auth-shell">
+  <div class="auth-brand">
+    <div class="marque"><span class="pastille"></span> SENTINEL</div>
+    <h2>Plateforme de surveillance infrastructure en temps reel : metriques, alertes intelligentes et rapports, sur tous vos serveurs.</h2>
+    <ul>
+      <li><span class="puce">⚡</span> Alertes email &amp; WhatsApp des la premiere anomalie detectee</li>
+      <li><span class="puce">📊</span> Historique complet et rapports PDF a la demande</li>
+      <li><span class="puce">🖥️</span> Vue unifiee de tous vos serveurs, locaux ou distants</li>
+    </ul>
   </div>
 
-  <div class="login-card">
-    <form method="post" action="{{ url_for('auth.login') }}" autocomplete="off">
-      <input type="hidden" name="suivant" value="{{ request.args.get('suivant', '') }}">
-
+  <div class="auth-form-wrap">
+    <button class="btn-icone theme-toggle" id="btn-theme" onclick="basculerTheme()">🌙</button>
+    <form method="post" class="auth-card">
+      <h1>Connexion</h1>
+      <p class="sous">Accedez a votre tableau de bord</p>
       {% if premiere_fois %}
-      <div class="rappel">
-        <span class="warning-icon">ℹ️</span>
-        <strong>Premier accès</strong><br>
-        Identifiant : <code>{{ identifiant_defaut }}</code> &nbsp;·&nbsp;
-        Mot de passe : <code>{{ mdp_defaut }}</code><br>
-        <span style="font-size:12px; color:var(--text-muted);">
-          Le mot de passe devra être changé immédiatement.
-        </span>
-      </div>
+      <div class="rappel">Premier acces : <code>{{ identifiant_defaut }}</code> /
+      <code>{{ mdp_defaut }}</code><br>Le mot de passe sera a changer immediatement.</div>
       {% endif %}
-
-      {% if erreur %}
-      <div class="erreur">
-        <span class="icon">⚠️</span>
-        {{ erreur }}
+      {% if erreur %}<div class="erreur">{{ erreur }}</div>{% endif %}
+      <div class="champ-auth">
+        <label>Identifiant</label>
+        <input name="username" autofocus required>
       </div>
-      {% endif %}
-
-      <div class="form-group">
-        <label for="username">Identifiant</label>
-        <div class="input-wrapper">
-          <input id="username" name="username" type="text" placeholder="votre identifiant" 
-                 value="{{ request.form.get('username', '') }}" required autofocus>
-        </div>
+      <div class="champ-auth">
+        <label>Mot de passe</label>
+        <input name="password" type="password" required>
       </div>
-
-      <div class="form-group">
-        <label for="password">Mot de passe</label>
-        <div class="input-wrapper">
-          <input id="password" name="password" type="password" placeholder="••••••••" required>
-        </div>
-      </div>
-
-      <button type="submit" class="btn-login">
-        Se connecter
-        <span class="arrow">→</span>
-      </button>
+      <button type="submit" class="btn-connexion">Se connecter →</button>
     </form>
-  </div>
-
-  <div class="login-footer">
-    <span class="status-dot"></span>
-    <span>Système opérationnel</span>
-    <span class="sep">·</span>
-    <span>v2.0</span>
   </div>
 </div>
 
-<script>
-  // === Gestion du thème ===
-  function basculerTheme() {
-    const clair = document.body.classList.toggle('light');
-    localStorage.setItem('sentinel-theme', clair ? 'light' : 'dark');
-  }
-
-  // === Rétablir le thème sauvegardé ===
-  (function initTheme() {
-    if (localStorage.getItem('sentinel-theme') === 'light') {
-      document.body.classList.add('light');
-    }
-  })();
-
-  // === Soumission du formulaire avec la touche Entrée ===
-  document.querySelector('form').addEventListener('keydown', function(e) {
-    if (e.key === 'Enter') {
-      e.preventDefault();
-      this.submit();
-    }
-  });
-
-  // === Focus automatique sur le champ identifiant ===
-  document.addEventListener('DOMContentLoaded', function() {
-    const usernameInput = document.getElementById('username');
-    if (usernameInput) {
-      usernameInput.focus();
-      // Si un nom d'utilisateur est déjà rempli (après erreur), focus sur le mot de passe
-      if (usernameInput.value) {
-        document.getElementById('password').focus();
-      }
-    }
-  });
-</script>
-</body>
-</html>
+<script>""" + JS_TEMA_ET_MENU + """</script>
+</body></html>
 """
 
 
@@ -821,302 +641,50 @@ def logout():
 
 
 _PAGE_CHANGER_MDP = """
-<!doctype html>
-<html lang="fr">
-<head>
-<meta charset="utf-8">
-<title>SENTINEL - Changer le mot de passe</title>
+<!doctype html><html lang="fr"><head><meta charset="utf-8">
+<title>Changer le mot de passe - SENTINEL</title>
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <style>
-  /* === Thème sombre (par défaut) === */
-  :root {
-    --bg-primary: #0B0F14;
-    --bg-secondary: #121820;
-    --bg-card: #161D26;
-    --bg-input: #0B0F14;
-    --border-color: #1E2733;
-    --text-primary: #E6EDF3;
-    --text-secondary: #7C8B99;
-    --text-muted: #4A5A6A;
-    --accent: #58A6FF;
-    --accent-hover: #79C0FF;
-    --success: #3FB950;
-    --danger: #F85149;
-    --warning: #D29922;
-    --shadow: rgba(0,0,0,0.5);
-    --input-bg: #0B0F14;
-    --transition: 0.3s ease;
-  }
-
-  /* === Thème clair === */
-  body.light {
-    --bg-primary: #EBEEF2;
-    --bg-secondary: #F7F8FA;
-    --bg-card: #EFF1F4;
-    --bg-input: #F7F8FA;
-    --border-color: #D8DDE3;
-    --text-primary: #2B3138;
-    --text-secondary: #6B7280;
-    --text-muted: #9AA0A8;
-    --accent: #2563EB;
-    --accent-hover: #3B82F6;
-    --shadow: rgba(0,0,0,0.12);
-    --input-bg: #F7F8FA;
-  }
-
-  * { box-sizing: border-box; margin: 0; padding: 0; }
-
-  body {
-    font-family: 'Inter', system-ui, -apple-system, sans-serif;
-    background: var(--bg-primary);
-    color: var(--text-primary);
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    min-height: 100vh;
-    margin: 0;
-    padding: 20px;
-    transition: background var(--transition), color var(--transition);
-  }
-
-  .login-container {
-    display: flex;
-    flex-direction: column;
-    align-items: center;
-    width: 100%;
-    max-width: 420px;
-    animation: fadeIn 0.6s ease;
-  }
-
-  @keyframes fadeIn {
-    from { opacity: 0; transform: translateY(-20px); }
-    to { opacity: 1; transform: translateY(0); }
-  }
-
-  .login-header {
-    text-align: center;
-    margin-bottom: 28px;
-  }
-
-  .login-header .logo { font-size: 42px; display: block; margin-bottom: 6px; }
-  .login-header h1 { font-size: 24px; font-weight: 700; letter-spacing: -0.5px; }
-  .login-header .subtitle { font-size: 14px; color: var(--text-secondary); margin-top: 2px; }
-
-  .login-card {
-    background: var(--bg-card);
-    border: 1px solid var(--border-color);
-    border-radius: 16px;
-    padding: 32px 28px 28px;
-    width: 100%;
-    box-shadow: 0 8px 40px var(--shadow);
-    transition: all var(--transition);
-  }
-
-  .info-text {
-    font-size: 13.5px;
-    color: var(--text-secondary);
-    line-height: 1.6;
-    margin-bottom: 20px;
-    padding: 12px 16px;
-    background: rgba(88, 166, 255, 0.06);
-    border-radius: 10px;
-    border-left: 3px solid var(--accent);
-  }
-
-  .info-text strong { color: var(--accent); }
-
-  .erreur {
-    background: rgba(248, 81, 73, 0.1);
-    border: 1px solid rgba(248, 81, 73, 0.25);
-    border-radius: 10px;
-    padding: 10px 14px;
-    font-size: 13px;
-    color: var(--danger);
-    margin-bottom: 16px;
-    display: flex;
-    align-items: center;
-    gap: 8px;
-    animation: shake 0.4s ease;
-  }
-
-  @keyframes shake {
-    0%, 100% { transform: translateX(0); }
-    20% { transform: translateX(-6px); }
-    40% { transform: translateX(6px); }
-    60% { transform: translateX(-4px); }
-    80% { transform: translateX(4px); }
-  }
-
-  .form-group { margin-bottom: 16px; }
-
-  .form-group label {
-    display: block;
-    font-size: 13px;
-    font-weight: 500;
-    color: var(--text-secondary);
-    margin-bottom: 5px;
-    letter-spacing: 0.3px;
-  }
-
-  .form-group input {
-    width: 100%;
-    padding: 12px 14px;
-    font-size: 15px;
-    font-family: inherit;
-    background: var(--bg-input);
-    border: 1.5px solid var(--border-color);
-    border-radius: 10px;
-    color: var(--text-primary);
-    outline: none;
-    transition: all var(--transition);
-    box-sizing: border-box;
-  }
-
-  .form-group input:focus {
-    border-color: var(--accent);
-    box-shadow: 0 0 0 3px rgba(88, 166, 255, 0.15);
-  }
-
-  .btn-login {
-    width: 100%;
-    padding: 13px;
-    font-size: 16px;
-    font-weight: 600;
-    font-family: inherit;
-    background: var(--accent);
-    color: #0B0F14;
-    border: none;
-    border-radius: 10px;
-    cursor: pointer;
-    transition: all var(--transition);
-    margin-top: 4px;
-  }
-
-  .btn-login:hover {
-    background: var(--accent-hover);
-    transform: translateY(-1px);
-    box-shadow: 0 4px 20px rgba(88, 166, 255, 0.3);
-  }
-
-  .btn-login:active { transform: translateY(0); }
-
-  .login-footer {
-    margin-top: 20px;
-    text-align: center;
-    font-size: 13px;
-    color: var(--text-muted);
-  }
-
-  .login-footer a {
-    color: var(--accent);
-    text-decoration: none;
-    transition: color var(--transition);
-  }
-
-  .login-footer a:hover { color: var(--accent-hover); text-decoration: underline; }
-
-  .theme-toggle {
-    position: fixed;
-    top: 20px;
-    right: 24px;
-    background: var(--bg-card);
-    border: 1px solid var(--border-color);
-    border-radius: 50%;
-    width: 44px;
-    height: 44px;
-    font-size: 20px;
-    cursor: pointer;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    transition: all var(--transition);
-    color: var(--text-secondary);
-    z-index: 100;
-  }
-
-  .theme-toggle:hover {
-    background: var(--border-color);
-    transform: scale(1.05);
-  }
-
-  .theme-toggle .icon-sun { display: none; }
-  .theme-toggle .icon-moon { display: block; }
-
-  body.light .theme-toggle .icon-sun { display: block; }
-  body.light .theme-toggle .icon-moon { display: none; }
-
-  @media (max-width: 480px) {
-    .login-card { padding: 24px 16px 20px; }
-    .login-header h1 { font-size: 20px; }
-    .theme-toggle { top: 12px; right: 12px; width: 38px; height: 38px; font-size: 17px; }
-  }
-</style>
-</head>
+""" + TOKENS_CSS + """
+  html,body{height:100%;}
+  body{display:flex; align-items:center; justify-content:center; position:relative;}
+  .theme-toggle{position:absolute; top:24px; right:24px;}
+  .auth-card{background:var(--panel); border:1px solid var(--border); border-radius:14px; padding:36px 38px;
+             width:100%; max-width:380px; box-shadow:0 20px 60px rgba(0,0,0,.25);}
+  .auth-card h1{font-size:18px; margin:0 0 8px; display:flex; align-items:center; gap:8px;}
+  .auth-card p.sous{color:var(--muted); font-size:13px; margin:0 0 20px; line-height:1.55;}
+  .champ-auth{margin-bottom:16px;}
+  .champ-auth label{display:block; font-size:11.5px; color:var(--muted); text-transform:uppercase;
+                     letter-spacing:.04em; margin-bottom:6px;}
+  .champ-auth input{width:100%;}
+  .btn-connexion{width:100%; padding:.7rem; margin-top:6px; border:0; border-radius:8px; background:var(--accent);
+                 color:#08131f; font-weight:700; font-size:14px; cursor:pointer;}
+  .btn-connexion:hover{filter:brightness(1.08);}
+  .erreur{background:rgba(248,81,73,.1); border:1px solid rgba(248,81,73,.35); color:var(--crit);
+          font-size:12.5px; padding:9px 12px; border-radius:7px; margin-bottom:14px;}
+</style></head>
 <body>
+<script>(function(){ if(localStorage.getItem('sentinel-theme') === 'light'){ document.body.classList.add('light'); } })();</script>
+<button class="btn-icone theme-toggle" id="btn-theme" onclick="basculerTheme()">🌙</button>
 
-<button class="theme-toggle" onclick="basculerTheme()" aria-label="Basculer le thème">
-  <span class="icon-moon">🌙</span>
-  <span class="icon-sun">☀️</span>
-</button>
-
-<div class="login-container">
-  <div class="login-header">
-    <span class="logo">🔑</span>
-    <h1>Nouveau mot de passe</h1>
-    <div class="subtitle">Première connexion ou mot de passe réinitialisé</div>
+<form method="post" class="auth-card">
+  <h1>🔑 Nouveau mot de passe requis</h1>
+  <p class="sous">Premiere connexion (ou mot de passe reinitialise par un admin) :
+  choisissez un mot de passe personnel avant de continuer.</p>
+  {% if erreur %}<div class="erreur">{{ erreur }}</div>{% endif %}
+  <div class="champ-auth">
+    <label>Nouveau mot de passe</label>
+    <input name="nouveau" type="password" placeholder="8 caracteres minimum" required>
   </div>
-
-  <div class="login-card">
-    <div class="info-text">
-      <strong>📌 Important :</strong> Choisissez un mot de passe personnel et sécurisé
-      (8 caractères minimum) avant de continuer.
-    </div>
-
-    {% if erreur %}
-    <div class="erreur">
-      <span>⚠️</span>
-      {{ erreur }}
-    </div>
-    {% endif %}
-
-    <form method="post">
-      <div class="form-group">
-        <label for="nouveau">Nouveau mot de passe</label>
-        <input id="nouveau" name="nouveau" type="password" placeholder="8 caractères minimum" required>
-      </div>
-
-      <div class="form-group">
-        <label for="confirmation">Confirmer le mot de passe</label>
-        <input id="confirmation" name="confirmation" type="password" placeholder="retapez le mot de passe" required>
-      </div>
-
-      <button type="submit" class="btn-login">Valider et continuer →</button>
-    </form>
+  <div class="champ-auth">
+    <label>Confirmation</label>
+    <input name="confirmation" type="password" placeholder="confirmer le mot de passe" required>
   </div>
+  <button type="submit" class="btn-connexion">Valider</button>
+</form>
 
-  <div class="login-footer">
-    <a href="{{ url_for('auth.logout') }}">Se déconnecter</a>
-  </div>
-</div>
-
-<script>
-  function basculerTheme() {
-    document.body.classList.toggle('light');
-    localStorage.setItem('sentinel-theme', document.body.classList.contains('light') ? 'light' : 'dark');
-  }
-
-  (function initTheme() {
-    if (localStorage.getItem('sentinel-theme') === 'light') {
-      document.body.classList.add('light');
-    }
-  })();
-
-  document.addEventListener('DOMContentLoaded', function() {
-    document.getElementById('nouveau').focus();
-  });
-</script>
-</body>
-</html>
+<script>""" + JS_TEMA_ET_MENU + """</script>
+</body></html>
 """
 
 
@@ -1140,238 +708,85 @@ def changer_mot_de_passe_route():
 
 _PAGE_ADMIN_USERS = """
 <!doctype html><html lang="fr"><head><meta charset="utf-8">
-<title>Gestion des utilisateurs</title>
+<title>Gestion des utilisateurs - SENTINEL</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
 <style>
-  :root {
-    --bg-primary: #0B0F14;
-    --bg-secondary: #121820;
-    --bg-card: #161D26;
-    --border-color: #1E2733;
-    --text-primary: #E6EDF3;
-    --text-secondary: #7C8B99;
-    --accent: #58A6FF;
-    --accent-hover: #79C0FF;
-    --danger: #F85149;
-    --success: #3FB950;
-    --transition: 0.3s ease;
-  }
+""" + TOKENS_CSS + """
+</style></head><body>
+<script>(function(){ if(localStorage.getItem('sentinel-theme') === 'light'){ document.body.classList.add('light'); } })();</script>
 
-  body.light {
-    --bg-primary: #EBEEF2;
-    --bg-secondary: #F7F8FA;
-    --bg-card: #EFF1F4;
-    --border-color: #D8DDE3;
-    --text-primary: #2B3138;
-    --text-secondary: #6B7280;
-    --accent: #2563EB;
-    --danger: #CF222E;
-    --success: #1A7F37;
-  }
+""" + "{{ topbar|safe }}" + """
 
-  * { box-sizing: border-box; margin: 0; padding: 0; }
-
-  body {
-    font-family: 'Inter', system-ui, -apple-system, sans-serif;
-    background: var(--bg-primary);
-    color: var(--text-primary);
-    padding: 2rem;
-    max-width: 900px;
-    margin: 0 auto;
-    transition: background var(--transition), color var(--transition);
-  }
-
-  a { color: var(--accent); text-decoration: none; }
-  a:hover { text-decoration: underline; }
-
-  .header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 1.5rem; flex-wrap: wrap; gap: 12px; }
-  .header h1 { font-size: 1.5rem; }
-
-  .theme-toggle {
-    background: var(--bg-card);
-    border: 1px solid var(--border-color);
-    border-radius: 50%;
-    width: 40px;
-    height: 40px;
-    font-size: 18px;
-    cursor: pointer;
-    transition: all var(--transition);
-    color: var(--text-secondary);
-  }
-
-  .theme-toggle:hover { background: var(--border-color); transform: scale(1.05); }
-
-  .msg {
-    background: rgba(63, 185, 80, 0.1);
-    border: 1px solid rgba(63, 185, 80, 0.2);
-    border-radius: 8px;
-    padding: 10px 14px;
-    color: var(--success);
-    margin-bottom: 1rem;
-  }
-
-  .card {
-    background: var(--bg-card);
-    border: 1px solid var(--border-color);
-    border-radius: 12px;
-    padding: 1.5rem;
-    margin-bottom: 1.5rem;
-    transition: all var(--transition);
-  }
-
-  .card h3 { font-size: 0.9rem; color: var(--text-secondary); text-transform: uppercase; letter-spacing: 0.05em; margin-bottom: 1rem; }
-
-  .form-row {
-    display: flex;
-    flex-wrap: wrap;
-    gap: 10px;
-    align-items: center;
-  }
-
-  .form-row input, .form-row select {
-    padding: 8px 12px;
-    border-radius: 8px;
-    border: 1px solid var(--border-color);
-    background: var(--bg-primary);
-    color: var(--text-primary);
-    font-size: 14px;
-    font-family: inherit;
-    transition: all var(--transition);
-    flex: 1 1 140px;
-  }
-
-  .form-row input:focus, .form-row select:focus {
-    border-color: var(--accent);
-    outline: none;
-    box-shadow: 0 0 0 3px rgba(88, 166, 255, 0.15);
-  }
-
-  .btn {
-    padding: 8px 16px;
-    border: none;
-    border-radius: 8px;
-    font-size: 13px;
-    font-weight: 600;
-    font-family: inherit;
-    cursor: pointer;
-    transition: all var(--transition);
-    background: var(--accent);
-    color: #0B0F14;
-    white-space: nowrap;
-  }
-
-  .btn:hover { background: var(--accent-hover); transform: translateY(-1px); }
-  .btn-danger { background: var(--danger); color: #fff; }
-  .btn-danger:hover { opacity: 0.85; }
-
-  table { width: 100%; border-collapse: collapse; font-size: 14px; }
-  th, td { padding: 10px 8px; border-bottom: 1px solid var(--border-color); text-align: left; }
-  th { color: var(--text-secondary); font-weight: 500; font-size: 12px; text-transform: uppercase; letter-spacing: 0.04em; }
-
-  .badge {
-    padding: 2px 10px;
-    border-radius: 20px;
-    font-size: 11px;
-    font-weight: 600;
-  }
-  .badge-admin { background: rgba(88, 166, 255, 0.2); color: var(--accent); }
-  .badge-user { background: var(--border-color); color: var(--text-secondary); }
-  .badge-warning { background: rgba(210, 153, 34, 0.2); color: #D29922; }
-  .badge-success { background: rgba(63, 185, 80, 0.2); color: var(--success); }
-
-  .actions { display: flex; flex-wrap: wrap; gap: 4px; }
-  .actions .btn { font-size: 11px; padding: 4px 10px; }
-  .actions form { display: inline; }
-
-  @media (max-width: 600px) {
-    body { padding: 1rem; }
-    .form-row { flex-direction: column; }
-    .form-row input, .form-row select { flex: 1 1 100%; }
-    .header { flex-direction: column; align-items: flex-start; }
-    table { font-size: 12px; }
-    th, td { padding: 6px 4px; }
-  }
-</style>
-</head>
-<body>
-
-<div class="header">
-  <div>
-    <h1>👥 Gestion des utilisateurs</h1>
-    <a href="{{ url_for('accueil') }}">← Retour au dashboard</a>
+<main class="contenu">
+  <div class="page-entete">
+    <h1>Gestion des utilisateurs</h1>
+    <p>Cree, active ou desactive les comptes ayant acces au dashboard.</p>
   </div>
-  <button class="theme-toggle" onclick="basculerTheme()">🌙</button>
-</div>
 
-{% if msg %}<div class="msg">✅ {{ msg }}</div>{% endif %}
+  {% if msg %}<div class="toast">{{ msg }}</div>{% endif %}
 
-<div class="card">
-  <h3>➕ Nouveau compte</h3>
-  <form method="post" action="{{ url_for('auth.admin_creer_utilisateur') }}" class="form-row">
-    <input name="username" placeholder="Identifiant" required>
-    <input name="password" type="password" placeholder="Mot de passe" required>
-    <select name="role">
-      <option value="user">utilisateur</option>
-      <option value="admin">administrateur</option>
-    </select>
-    <button type="submit" class="btn">Créer</button>
-  </form>
-</div>
+  <div class="carte">
+    <h3>Nouveau compte</h3>
+    <p class="aide-carte">L'utilisateur devra changer ce mot de passe des sa premiere connexion.</p>
+    <form method="post" action="{{ url_for('auth.admin_creer_utilisateur') }}">
+      <div class="champs-form">
+        <div class="champ"><label>Identifiant</label><input name="username" placeholder="ex: jean.dupont" required></div>
+        <div class="champ"><label>Mot de passe temporaire</label><input name="password" type="password" placeholder="mot de passe initial" required></div>
+        <div class="champ" style="max-width:150px;"><label>Role</label>
+          <select name="role"><option value="user">Utilisateur</option><option value="admin">Administrateur</option></select>
+        </div>
+        <button type="submit" class="btn-principal">+ Creer</button>
+      </div>
+    </form>
+  </div>
 
-<table>
-  <thead>
-    <tr>
-      <th>Identifiant</th>
-      <th>Rôle</th>
-      <th>Statut</th>
-      <th>Créé le</th>
-      <th>Actions</th>
-    </tr>
-  </thead>
-  <tbody>
-    {% for u in utilisateurs %}
-    <tr>
-      <td>
-        {{ u.username }}
-        {% if u.doit_changer_mdp %}
-        <span class="badge badge-warning">mdp à changer</span>
-        {% endif %}
-      </td>
-      <td><span class="badge {{ 'badge-admin' if u.role == 'admin' else 'badge-user' }}">{{ u.role }}</span></td>
-      <td><span class="badge {{ 'badge-success' if u.actif else 'badge-warning' }}">{{ 'actif' if u.actif else 'inactif' }}</span></td>
-      <td>{{ u.cree_le[:10] if u.cree_le else '' }}</td>
-      <td>
-        <div class="actions">
+  <div class="carte">
+    <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:14px;">
+      <h3 style="margin:0;">Comptes existants</h3>
+      <input class="recherche" id="recherche-user" placeholder="Rechercher..." oninput="filtrerUtilisateurs()">
+    </div>
+    <table class="table-pro" id="table-utilisateurs">
+      <tr><th>Utilisateur</th><th>Role</th><th>Statut</th><th>Cree le</th><th>Actions</th></tr>
+      {% for u in utilisateurs %}
+      <tr>
+        <td>
+          <div class="cellule-nom">
+            <span class="avatar">{{ u.username[0]|upper }}</span>
+            {{ u.username }}
+            {% if u.doit_changer_mdp %}<span class="badge attention">mdp a changer</span>{% endif %}
+          </div>
+        </td>
+        <td><span class="badge {{ u.role }}">{{ 'Admin' if u.role == 'admin' else 'Utilisateur' }}</span></td>
+        <td><span class="badge {{ 'actif' if u.actif else 'inactif' }}">{{ 'Actif' if u.actif else 'Desactive' }}</span></td>
+        <td>{{ u.cree_le }}</td>
+        <td class="actions-ligne">
           {% if u.username != current_username %}
-          <form method="post" action="{{ url_for('auth.admin_changer_role', user_id=u.id) }}">
+          <form method="post" action="{{ url_for('auth.admin_changer_role', user_id=u.id) }}" style="display:inline">
             <input type="hidden" name="role" value="{{ 'user' if u.role == 'admin' else 'admin' }}">
-            <button type="submit" class="btn">{{ '⬇ user' if u.role == 'admin' else '⬆ admin' }}</button>
+            <button type="submit" class="btn-fantome">Passer {{ 'utilisateur' if u.role == 'admin' else 'admin' }}</button>
           </form>
-          <form method="post" action="{{ url_for('auth.admin_toggle_actif', user_id=u.id) }}">
-            <button type="submit" class="btn btn-danger">{{ 'Désactiver' if u.actif else 'Réactiver' }}</button>
+          <form method="post" action="{{ url_for('auth.admin_toggle_actif', user_id=u.id) }}" style="display:inline"
+                {% if u.actif %}onsubmit="return confirm('Desactiver {{ u.username }} ?');"{% endif %}>
+            <button type="submit" class="{{ 'btn-danger' if u.actif else 'btn-fantome' }}">{{ 'Desactiver' if u.actif else 'Reactiver' }}</button>
           </form>
           {% else %}
-          <span style="color:var(--text-secondary); font-size:12px;">(vous)</span>
+          <span style="color:var(--muted); font-size:12.5px;">(vous)</span>
           {% endif %}
-        </div>
-      </td>
-    </tr>
-    {% endfor %}
-  </tbody>
-</table>
+        </td>
+      </tr>
+      {% endfor %}
+    </table>
+  </div>
+</main>
 
-<script>
-  function basculerTheme() {
-    const clair = document.body.classList.toggle('light');
-    localStorage.setItem('sentinel-theme', clair ? 'light' : 'dark');
-    document.querySelector('.theme-toggle').textContent = clair ? '☀️' : '🌙';
-  }
-
-  (function initTheme() {
-    if (localStorage.getItem('sentinel-theme') === 'light') {
-      document.body.classList.add('light');
-      document.querySelector('.theme-toggle').textContent = '☀️';
-    }
-  })();
+<script>""" + JS_TEMA_ET_MENU + """
+function filtrerUtilisateurs(){
+  const q = document.getElementById('recherche-user').value.toLowerCase();
+  document.querySelectorAll('#table-utilisateurs tr').forEach((ligne, i) => {
+    if(i === 0) return;
+    ligne.style.display = ligne.textContent.toLowerCase().includes(q) ? '' : 'none';
+  });
+}
 </script>
 </body></html>
 """
@@ -1385,6 +800,7 @@ def admin_utilisateurs():
         utilisateurs=lister_utilisateurs(),
         current_username=current_user.username,
         msg=request.args.get("msg"),
+        topbar=render_topbar("utilisateurs"),
     )
 
 

@@ -34,6 +34,7 @@ from rapport_pdf import lancer_planificateur_en_arriere_plan, generer_rapport
 from chatbot import repondre_question
 import auth
 from destinataires import destinataires_bp
+from parametres import parametres_bp
 
 app = Flask(__name__)
 # Cle de session generee et sauvegardee automatiquement (voir auth.py) : pas
@@ -44,6 +45,7 @@ auth.init_login_manager(app)
 auth.bootstrap_admin_auto()
 app.register_blueprint(auth.auth_bp)
 app.register_blueprint(destinataires_bp)
+app.register_blueprint(parametres_bp)
 
 
 @app.before_request
@@ -331,25 +333,7 @@ def api_chat():
 @app.route("/")
 @login_required
 def accueil():
-    liens_admin = ""
-    if current_user.is_admin:
-        liens_admin = (
-            f'<a class="menu-item" href="{url_for("auth.admin_utilisateurs")}">👤 Gérer les utilisateurs</a>'
-            f'<a class="menu-item" href="{url_for("destinataires.page_responsables")}">📣 Gérer les responsables</a>'
-        )
-    barre = f'''
-    <div class="user-menu-wrapper">
-        <span class="user-name" id="userMenuBtn">{current_user.username} ▾</span>
-        <div class="user-dropdown" id="userDropdown">
-            <div class="menu-item" onclick="alert('Profil - Fonctionnalité à venir')">👤 Profil</div>
-            <div class="menu-item" onclick="alert('Paramètres - Fonctionnalité à venir')">⚙️ Paramètres</div>
-            {liens_admin}
-            <hr style="border-color:var(--border); margin:4px 0;">
-            <a class="menu-item" href="{url_for("auth.logout")}" style="color:var(--crit);">🚪 Déconnexion</a>
-        </div>
-    </div>
-    '''
-    return PAGE_HTML.replace("<!--__BARRE_UTILISATEUR__-->", barre)
+    return PAGE_HTML.replace("<!--__BARRE_UTILISATEUR__-->", auth.render_menu_utilisateur("dashboard"))
 
 
 @socketio.on("connect")
@@ -499,62 +483,29 @@ PAGE_HTML = """
   #chat-input{flex:1; background:transparent; border:none; color:var(--text); padding:10px 12px; font-size:12.5px; outline:none;}
   #chat-form button{background:none; border:none; color:var(--accent); font-weight:700; padding:0 14px; cursor:pointer;}
 
-  
-  /* Menu utilisateur déroulant */
-.user-menu-wrapper {
-  position: relative;
-  display: inline-block;
-}
-.user-name {
-  color: var(--text);
-  font-size: 13px;
-  cursor: pointer;
-  padding: 6px 10px;
-  border-radius: 6px;
-  transition: background 0.2s;
-  user-select: none;
-}
-.user-name:hover {
-  background: var(--panel2);
-}
-.user-dropdown {
-  display: none;
-  position: absolute;
-  top: calc(100% + 6px);
-  right: 0;
-  background: var(--panel);
-  border: 1px solid var(--border);
-  border-radius: 10px;
-  min-width: 200px;
-  z-index: 100;
-  box-shadow: 0 8px 30px rgba(0,0,0,0.4);
-  padding: 6px 0;
-  overflow: hidden;
-}
-.user-dropdown.ouvert {
-  display: block;
-}
-.user-dropdown .menu-item {
-  display: block;
-  padding: 8px 16px;
-  font-size: 13px;
-  color: var(--text);
-  text-decoration: none;
-  cursor: pointer;
-  transition: background 0.15s;
-  border: none;
-  background: transparent;
-  width: 100%;
-  text-align: left;
-}
-.user-dropdown .menu-item:hover {
-  background: var(--panel2);
-}
-.user-dropdown hr {
-  margin: 4px 12px;
-  border: none;
-  border-top: 1px solid var(--border);
-}
+  /* Menu utilisateur (avatar + nom + menu deroulant) — composant partage
+     avec auth.py / destinataires.py, ouverture au clic ET au survol. */
+  .menu-user{position:relative;}
+  .menu-user-btn{display:flex; align-items:center; gap:8px; background:transparent; border:1px solid var(--border);
+                 border-radius:20px; padding:5px 12px 5px 5px; cursor:pointer; color:var(--text); font-size:13px;}
+  .menu-user-btn:hover{border-color:var(--muted);}
+  .menu-user .avatar{width:26px; height:26px; border-radius:50%; background:var(--accent); color:#08131f;
+                      display:flex; align-items:center; justify-content:center; font-weight:700; font-size:12px; flex-shrink:0;}
+  .menu-user .chevron{color:var(--muted); font-size:10px; transition:transform .15s;}
+  .menu-user.ouvert .chevron{transform:rotate(180deg);}
+  .menu-user-dropdown{display:none; position:absolute; top:calc(100% + 8px); right:0; min-width:220px;
+                       background:var(--panel); border:1px solid var(--border); border-radius:10px;
+                       box-shadow:0 10px 30px rgba(0,0,0,.3); z-index:200; overflow:hidden;}
+  .menu-user.ouvert .menu-user-dropdown{display:block;}
+  .menu-user-info{padding:12px 14px; border-bottom:1px solid var(--border);}
+  .menu-user-info .nom{font-weight:600; font-size:13.5px;}
+  .menu-user-info .role{display:inline-block; margin-top:4px; font-size:10.5px; padding:2px 8px; border-radius:10px;
+                          background:rgba(88,166,255,.15); color:var(--accent); text-transform:uppercase; letter-spacing:.04em;}
+  .menu-user-dropdown a, .menu-user-dropdown .item{display:flex; align-items:center; gap:9px; padding:10px 14px;
+                          font-size:13px; color:var(--text); cursor:pointer; text-decoration:none;}
+  .menu-user-dropdown a:hover, .menu-user-dropdown .item:hover{background:var(--panel2);}
+  .menu-user-dropdown .item.danger{color:var(--crit);}
+  .menu-user-dropdown .separateur{height:1px; background:var(--border); margin:4px 0;}
 </style>
 </head>
 <body>
@@ -1452,33 +1403,22 @@ document.getElementById('chat-form').addEventListener('submit', async (ev) => {
   messages.scrollTop = messages.scrollHeight;
 });
 
-// --- Menu utilisateur déroulant (hover) ---
-document.addEventListener('DOMContentLoaded', function() {
-    const wrapper = document.querySelector('.user-menu-wrapper');
-    const dropdown = document.getElementById('userDropdown');
-    
-    if (wrapper && dropdown) {
-        // Ouverture au survol
-        wrapper.addEventListener('mouseenter', function() {
-            dropdown.classList.add('ouvert');
-        });
-        
-        // Fermeture quand la souris quitte le wrapper
-        wrapper.addEventListener('mouseleave', function(e) {
-            // Vérifier si on ne survole pas un enfant du wrapper
-            if (!wrapper.contains(e.relatedTarget)) {
-                dropdown.classList.remove('ouvert');
-            }
-        });
-        
-        // Fermeture si on clique ailleurs
-        document.addEventListener('click', function(e) {
-            if (!wrapper.contains(e.target)) {
-                dropdown.classList.remove('ouvert');
-            }
-        });
-    }
-});
+// --- Menu utilisateur deroulant (clic OU survol, meme composant que sur
+// les pages d'administration) ---
+(function(){
+  let delaiFermeture = null;
+  document.addEventListener('DOMContentLoaded', () => {
+    const menu = document.getElementById('menu-utilisateur');
+    if(!menu) return;
+    const bouton = menu.querySelector('.menu-user-btn');
+    const ouvrir = () => { clearTimeout(delaiFermeture); menu.classList.add('ouvert'); };
+    const fermer = () => { delaiFermeture = setTimeout(() => menu.classList.remove('ouvert'), 220); };
+    bouton.addEventListener('click', (e) => { e.stopPropagation(); menu.classList.toggle('ouvert'); });
+    menu.addEventListener('mouseenter', ouvrir);
+    menu.addEventListener('mouseleave', fermer);
+    document.addEventListener('click', (e) => { if(!menu.contains(e.target)) menu.classList.remove('ouvert'); });
+  });
+})();
 </script>
 
 </body>
