@@ -35,13 +35,6 @@ from chatbot import repondre_question
 import auth
 from destinataires import destinataires_bp
 from parametres import parametres_bp
-import assignations
-from assignations import assignations_bp
-import groupes
-from groupes import groupes_bp
-import audit
-from audit import audit_bp
-from flask_socketio import join_room, emit as socketio_emit_local
 
 app = Flask(__name__)
 # Cle de session generee et sauvegardee automatiquement (voir auth.py) : pas
@@ -53,9 +46,6 @@ auth.bootstrap_admin_auto()
 app.register_blueprint(auth.auth_bp)
 app.register_blueprint(destinataires_bp)
 app.register_blueprint(parametres_bp)
-app.register_blueprint(assignations_bp)
-app.register_blueprint(groupes_bp)
-app.register_blueprint(audit_bp)
 
 
 @app.before_request
@@ -82,17 +72,6 @@ HISTORIQUE_MAX_POINTS = 120  # 120 x 5s = 10 minutes de courbe glissante
 
 _etat_serveurs = {}
 _verrou = threading.Lock()
-
-
-def _machines_visibles():
-    """None = admin, aucune restriction. set() ou {machines...} = restriction
-    stricte pour un compte 'user' (voir assignations.py)."""
-    return assignations.machines_autorisees(current_user)
-
-
-def _machine_est_visible(nom_machine) -> bool:
-    autorisees = _machines_visibles()
-    return autorisees is None or nom_machine in autorisees
 
 
 def _point_courbe(m: dict) -> dict:
@@ -149,18 +128,14 @@ def traiter_mesure(serveur: str, m: dict, anomalies: list, explication: str = No
     incidents_stabilises = historique.mettre_a_jour_stabilisation(serveur, m)
 
     score = _score_json(serveur, m)
-    payload = {
+    socketio.emit("maj_serveur", {
         "serveur": serveur, "metriques": m, "anomalies": anomalies,
         "explication": explication_actuelle, "score": score,
         "courbe_point": _point_courbe(m),
-    }
-    socketio.emit("maj_serveur", payload, room=f"machine:{serveur}")
-    socketio.emit("maj_serveur", payload, room="admins")
+    })
 
     if incidents_stabilises:
-        stab_payload = {"serveur": serveur, "ids": incidents_stabilises}
-        socketio.emit("incident_stabilise", stab_payload, room=f"machine:{serveur}")
-        socketio.emit("incident_stabilise", stab_payload, room="admins")
+        socketio.emit("incident_stabilise", {"serveur": serveur, "ids": incidents_stabilises})
 
     if anomalies:
         threading.Thread(
@@ -203,10 +178,7 @@ def _traiter_anomalies_en_arriere_plan(serveur: str, m: dict, anomalies: list, e
 
         # Diffuse l'explication (arrivee un peu apres les metriques) sans
         # retoucher au reste de l'etat deja affiche.
-        socketio.emit("maj_explication", {"serveur": serveur, "explication": explication_combinee},
-                      room=f"machine:{serveur}")
-        socketio.emit("maj_explication", {"serveur": serveur, "explication": explication_combinee},
-                      room="admins")
+        socketio.emit("maj_explication", {"serveur": serveur, "explication": explication_combinee})
     except Exception as e:
         print(f"[dashboard] Erreur traitement anomalies en arriere-plan (ignoree) : {e}")
 
@@ -235,11 +207,7 @@ def boucle_resolution_auto():
         historique.resoudre_incidents_expires()
         apres_ouverts = {i["id"] for i in historique.lister_incidents(statut="ouvert")}
         for resolu_id in (avant - apres_ouverts):
-            serveur_incident = historique.obtenir_serveur_incident(resolu_id)
-            payload = {"id": resolu_id}
-            if serveur_incident:
-                socketio.emit("incident_resolu", payload, room=f"machine:{serveur_incident}")
-            socketio.emit("incident_resolu", payload, room="admins")
+            socketio.emit("incident_resolu", {"id": resolu_id})
 
         compteur_cycles += 1
         if compteur_cycles % 60 == 0:  # une fois par heure environ (60 x 60s)
@@ -273,9 +241,7 @@ def api_ingest():
 
 
 @app.route("/api/status")
-@login_required
 def api_status():
-    autorisees = _machines_visibles()
     with _verrou:
         return jsonify({
             nom: {
@@ -284,42 +250,22 @@ def api_status():
                 "courbe": list(e["courbe"]), "score": _score_json(nom, e["metriques"]),
             }
             for nom, e in _etat_serveurs.items()
-            if autorisees is None or nom in autorisees
         })
 
 
 @app.route("/api/incidents")
-@login_required
 def api_incidents():
     limite = request.args.get("limite", default=50, type=int)
-    serveur_demande = request.args.get("serveur")
-    autorisees = _machines_visibles()
-    if autorisees is not None:
-        if serveur_demande and serveur_demande not in autorisees:
-            return jsonify({"erreur": "Non autorise pour cette machine."}), 403
-        kwargs = {"serveur": serveur_demande} if serveur_demande else {"serveurs": list(autorisees)}
-    else:
-        kwargs = {"serveur": serveur_demande}
     return jsonify(historique.lister_incidents(
-        statut=request.args.get("statut"), limite=limite,
+        serveur=request.args.get("serveur"), statut=request.args.get("statut"), limite=limite,
         type_anomalie=request.args.get("type"), niveau=request.args.get("niveau"),
         depuis=request.args.get("depuis"), jusqua=request.args.get("jusqua"),
-        **kwargs,
     ))
 
 
 @app.route("/api/incidents/compte")
-@login_required
 def api_incidents_compte():
-    serveur_demande = request.args.get("serveur")
-    autorisees = _machines_visibles()
-    if autorisees is not None:
-        if serveur_demande and serveur_demande not in autorisees:
-            return jsonify({"erreur": "Non autorise pour cette machine."}), 403
-        kwargs = {"serveur": serveur_demande} if serveur_demande else {"serveurs": list(autorisees)}
-    else:
-        kwargs = {"serveur": serveur_demande}
-    return jsonify(historique.compter_incidents_par_statut(**kwargs))
+    return jsonify(historique.compter_incidents_par_statut(serveur=request.args.get("serveur")))
 
 
 @app.route("/api/acquitter", methods=["POST"])
@@ -343,17 +289,14 @@ def api_infos_types():
 
 
 @app.route("/api/rapport")
-@login_required
 def api_rapport():
+    """Genere un rapport PDF a la demande et le renvoie en telechargement.
+    ?jours=1|7|30|90 (defaut 7) et ?serveur=nom (optionnel, sinon tous les
+    serveurs). La generation (graphiques + PDF) prend quelques secondes,
+    c'est normal — le bouton cote dashboard affiche un indicateur de
+    chargement pendant ce temps."""
     jours = request.args.get("jours", default=7, type=int)
     serveur = request.args.get("serveur") or None
-    autorisees = _machines_visibles()
-    if autorisees is not None:
-        if serveur is None:
-            return jsonify({"erreur": "Precisez une machine (parametre 'serveur') — "
-                                       "compte restreint, pas de rapport multi-machines."}), 400
-        if serveur not in autorisees:
-            return jsonify({"erreur": "Non autorise pour cette machine."}), 403
     try:
         chemin = generer_rapport(jours_historique=jours, serveur=serveur)
     except Exception as e:
@@ -362,11 +305,8 @@ def api_rapport():
 
 
 @app.route("/api/historique_metriques")
-@login_required
 def api_historique_metriques():
     serveur = request.args.get("serveur", "Serveur-Dashboard-OpenShift")
-    if not _machine_est_visible(serveur):
-        return jsonify({"erreur": "Non autorise pour cette machine."}), 403
     heures = float(request.args.get("heures", 1))
     mesures = historique.recuperer_mesures(serveur, heures=heures)
     incidents = historique.lister_incidents(serveur=serveur)
@@ -374,64 +314,26 @@ def api_historique_metriques():
 
 
 @app.route("/api/incidents/<int:incident_id>/resoudre", methods=["POST"])
-@login_required
 def api_resoudre_incident(incident_id):
-    serveur_incident = historique.obtenir_serveur_incident(incident_id)
-    if serveur_incident and not _machine_est_visible(serveur_incident):
-        return jsonify({"erreur": "Non autorise pour cette machine."}), 403
     historique.resoudre_incident_manuellement(incident_id)
-    payload = {"id": incident_id}
-    if serveur_incident:
-        socketio.emit("incident_resolu", payload, room=f"machine:{serveur_incident}")
-    socketio.emit("incident_resolu", payload, room="admins")
+    socketio.emit("incident_resolu", {"id": incident_id})
     return jsonify({"ok": True})
 
 
 @app.route("/api/chat", methods=["POST"])
-@login_required
 def api_chat():
     data = request.get_json(force=True, silent=True) or {}
     question = (data.get("question") or "").strip()
     if not question:
         return jsonify({"erreur": "question vide"}), 400
-    serveur = data.get("serveur")
-    autorisees = _machines_visibles()
-    if autorisees is not None:
-        if serveur is None:
-            return jsonify({"erreur": "Precisez une machine — compte restreint, "
-                                       "pas de question multi-machines."}), 400
-        if serveur not in autorisees:
-            return jsonify({"erreur": "Non autorise pour cette machine."}), 403
-    reponse = repondre_question(question, serveur=serveur)
+    reponse = repondre_question(question, serveur=data.get("serveur"))
     return jsonify({"reponse": reponse})
 
 
 @app.route("/")
 @login_required
 def accueil():
-    liens_admin = ""
-    if current_user.is_admin:
-        liens_admin = (
-            f'<a class="btn-periode" style="padding:7px 12px;text-decoration:none;" '
-            f'href="{url_for("auth.admin_utilisateurs")}">👤 Utilisateurs</a>'
-            f'<a class="btn-periode" style="padding:7px 12px;text-decoration:none;" '
-            f'href="{url_for("destinataires.page_responsables")}">📣 Responsables</a>'
-            f'<a class="btn-periode" style="padding:7px 12px;text-decoration:none;" '
-            f'href="{url_for("parametres.page_parametres")}">✉️ Email</a>'
-            f'<a class="btn-periode" style="padding:7px 12px;text-decoration:none;" '
-            f'href="{url_for("assignations.page_assignations")}">🖥️ Machines</a>'
-            f'<a class="btn-periode" style="padding:7px 12px;text-decoration:none;" '
-            f'href="{url_for("groupes.page_liste")}">👥 Groupes</a>'
-            f'<a class="btn-periode" style="padding:7px 12px;text-decoration:none;" '
-            f'href="{url_for("audit.page_audit")}">📜 Audit</a>'
-        )
-    barre = (
-        f'<span style="color:var(--muted); font-size:13px;">{current_user.username}</span>'
-        f'{liens_admin}'
-        f'<a class="btn-periode" style="padding:7px 12px;text-decoration:none;" '
-        f'href="{url_for("auth.logout")}">🚪 Deconnexion</a>'
-    )
-    return PAGE_HTML.replace("<!--__BARRE_UTILISATEUR__-->", barre)
+    return PAGE_HTML.replace("<!--__BARRE_UTILISATEUR__-->", auth.render_menu_utilisateur("dashboard"))
 
 
 @socketio.on("connect")
@@ -441,27 +343,15 @@ def on_connect():
     # les donnees temps reel fuiteraient meme avec les routes HTTP protegees.
     if not current_user.is_authenticated:
         return False  # refuse la connexion socket.io
-
-    autorisees = _machines_visibles()
-    if autorisees is None:
-        join_room("admins")
-    else:
-        for m in autorisees:
-            join_room(f"machine:{m}")
-
     with _verrou:
-        etat_filtre = {
+        socketio.emit("etat_initial", {
             nom: {
                 "metriques": e["metriques"], "anomalies": e["anomalies"],
                 "explication": e["explication"], "courbe": list(e["courbe"]),
                 "score": _score_json(nom, e["metriques"]),
             }
             for nom, e in _etat_serveurs.items()
-            if autorisees is None or nom in autorisees
-        }
-    # emit() (pas socketio.emit()) envoie uniquement au client qui vient de
-    # se connecter, pas a tout le monde — chacun ne recoit que SES machines.
-    socketio_emit_local("etat_initial", etat_filtre)
+        })
 
 
 PAGE_HTML = """
@@ -592,6 +482,30 @@ PAGE_HTML = """
   #chat-form{display:flex; border-top:1px solid var(--border);}
   #chat-input{flex:1; background:transparent; border:none; color:var(--text); padding:10px 12px; font-size:12.5px; outline:none;}
   #chat-form button{background:none; border:none; color:var(--accent); font-weight:700; padding:0 14px; cursor:pointer;}
+
+  /* Menu utilisateur (avatar + nom + menu deroulant) — composant partage
+     avec auth.py / destinataires.py, ouverture au clic ET au survol. */
+  .menu-user{position:relative;}
+  .menu-user-btn{display:flex; align-items:center; gap:8px; background:transparent; border:1px solid var(--border);
+                 border-radius:20px; padding:5px 12px 5px 5px; cursor:pointer; color:var(--text); font-size:13px;}
+  .menu-user-btn:hover{border-color:var(--muted);}
+  .menu-user .avatar{width:26px; height:26px; border-radius:50%; background:var(--accent); color:#08131f;
+                      display:flex; align-items:center; justify-content:center; font-weight:700; font-size:12px; flex-shrink:0;}
+  .menu-user .chevron{color:var(--muted); font-size:10px; transition:transform .15s;}
+  .menu-user.ouvert .chevron{transform:rotate(180deg);}
+  .menu-user-dropdown{display:none; position:absolute; top:calc(100% + 8px); right:0; min-width:220px;
+                       background:var(--panel); border:1px solid var(--border); border-radius:10px;
+                       box-shadow:0 10px 30px rgba(0,0,0,.3); z-index:200; overflow:hidden;}
+  .menu-user.ouvert .menu-user-dropdown{display:block;}
+  .menu-user-info{padding:12px 14px; border-bottom:1px solid var(--border);}
+  .menu-user-info .nom{font-weight:600; font-size:13.5px;}
+  .menu-user-info .role{display:inline-block; margin-top:4px; font-size:10.5px; padding:2px 8px; border-radius:10px;
+                          background:rgba(88,166,255,.15); color:var(--accent); text-transform:uppercase; letter-spacing:.04em;}
+  .menu-user-dropdown a, .menu-user-dropdown .item{display:flex; align-items:center; gap:9px; padding:10px 14px;
+                          font-size:13px; color:var(--text); cursor:pointer; text-decoration:none;}
+  .menu-user-dropdown a:hover, .menu-user-dropdown .item:hover{background:var(--panel2);}
+  .menu-user-dropdown .item.danger{color:var(--crit);}
+  .menu-user-dropdown .separateur{height:1px; background:var(--border); margin:4px 0;}
 </style>
 </head>
 <body>
@@ -1488,6 +1402,23 @@ document.getElementById('chat-form').addEventListener('submit', async (ev) => {
   }
   messages.scrollTop = messages.scrollHeight;
 });
+
+// --- Menu utilisateur deroulant (clic OU survol, meme composant que sur
+// les pages d'administration) ---
+(function(){
+  let delaiFermeture = null;
+  document.addEventListener('DOMContentLoaded', () => {
+    const menu = document.getElementById('menu-utilisateur');
+    if(!menu) return;
+    const bouton = menu.querySelector('.menu-user-btn');
+    const ouvrir = () => { clearTimeout(delaiFermeture); menu.classList.add('ouvert'); };
+    const fermer = () => { delaiFermeture = setTimeout(() => menu.classList.remove('ouvert'), 220); };
+    bouton.addEventListener('click', (e) => { e.stopPropagation(); menu.classList.toggle('ouvert'); });
+    menu.addEventListener('mouseenter', ouvrir);
+    menu.addEventListener('mouseleave', fermer);
+    document.addEventListener('click', (e) => { if(!menu.contains(e.target)) menu.classList.remove('ouvert'); });
+  });
+})();
 </script>
 
 </body>
