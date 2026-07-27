@@ -215,4 +215,7 @@ def enregistrer_route():
         port_int = 465
 
     enregistrer_config_email(host, port_int, utilisateur, mot_de_passe)
+    import audit
+    audit.consigner("modification_config_email", cible=utilisateur,
+                     details=f"host={host}:{port_int}")  # jamais le mot de passe dans le journal
     return redirect(url_for("parametres.page_parametres", msg="Configuration enregistree."))

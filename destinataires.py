@@ -22,7 +22,7 @@ from contextlib import contextmanager
 from flask import Blueprint, request, redirect, url_for, render_template_string
 
 import historique
-from auth import admin_required, TOKENS_CSS, JS_TEMA_ET_MENU, render_topbar
+from auth import admin_required
 
 CHEMIN_DB = os.path.join(historique.DOSSIER_DATA, "auth.db")  # meme fichier que auth.py
 
@@ -138,84 +138,55 @@ destinataires_bp = Blueprint("destinataires", __name__)
 
 _PAGE = """
 <!doctype html><html lang="fr"><head><meta charset="utf-8">
-<title>Responsables des alertes - SENTINEL</title>
-<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Responsables des alertes</title>
 <style>
-""" + TOKENS_CSS + """
+  body{font-family:system-ui,sans-serif;background:#0f1115;color:#e6e6e6;padding:2rem;max-width:820px;margin:0 auto}
+  a{color:#3b82f6}
+  table{width:100%;border-collapse:collapse;margin:1rem 0 2rem}
+  th,td{padding:.5rem;border-bottom:1px solid #2a2d34;text-align:left}
+  input,select{padding:.4rem;border-radius:6px;border:1px solid #333;background:#1a1d24;color:#e6e6e6;margin-right:.3rem}
+  button{padding:.4rem .8rem;border:0;border-radius:6px;background:#3b82f6;color:#fff;cursor:pointer}
+  .danger{background:#e01e5a}
+  .msg{color:#4ade80;margin-bottom:1rem}
+  .aide{color:#9aa0aa;font-size:.85rem;margin:.3rem 0 1rem}
 </style></head><body>
-<script>(function(){ if(localStorage.getItem('sentinel-theme') === 'light'){ document.body.classList.add('light'); } })();</script>
+<p><a href="{{ url_for('accueil') }}">&larr; Retour au dashboard</a></p>
+<h1>Responsables des alertes</h1>
+{% if msg %}<div class="msg">{{ msg }}</div>{% endif %}
 
-""" + "{{ topbar|safe }}" + """
+<h3>Ajouter un responsable</h3>
+<form method="post" action="{{ url_for('destinataires.ajouter_route') }}">
+  <input name="nom" placeholder="nom" required>
+  <select name="canal" id="canal-select" onchange="document.getElementById('champ-apikey').style.display = this.value === 'whatsapp' ? 'inline-block' : 'none'">
+    <option value="email">email</option>
+    <option value="whatsapp">whatsapp</option>
+  </select>
+  <input name="contact" placeholder="adresse email ou numero (+216...)" required>
+  <input id="champ-apikey" name="apikey" placeholder="cle CallMeBot (whatsapp uniquement)" style="display:none">
+  <button type="submit">Ajouter</button>
+</form>
+<p class="aide">Pour WhatsApp : le responsable doit d'abord envoyer "I allow callmebot to send me
+messages" au contact CallMeBot pour recevoir sa propre cle API.</p>
 
-<main class="contenu">
-  <div class="page-entete">
-    <h1>Responsables des alertes</h1>
-    <p>Definit qui recoit les notifications par email ou WhatsApp, machine par machine.</p>
-  </div>
-
-  {% if msg %}<div class="toast">{{ msg }}</div>{% endif %}
-
-  <div class="carte">
-    <h3>Ajouter un responsable</h3>
-    <p class="aide-carte">Pour WhatsApp : le responsable doit d'abord envoyer "I allow callmebot to send me
-    messages" au contact CallMeBot pour recevoir sa propre cle API.</p>
-    <form method="post" action="{{ url_for('destinataires.ajouter_route') }}">
-      <div class="champs-form">
-        <div class="champ"><label>Nom</label><input name="nom" placeholder="ex: Jean Dupont" required></div>
-        <div class="champ" style="max-width:150px;"><label>Canal</label>
-          <select name="canal" id="canal-select" onchange="document.getElementById('champ-apikey').style.display = this.value === 'whatsapp' ? 'flex' : 'none'">
-            <option value="email">📧 Email</option>
-            <option value="whatsapp">💬 WhatsApp</option>
-          </select>
-        </div>
-        <div class="champ"><label>Contact</label><input name="contact" placeholder="email ou +216..." required></div>
-        <div class="champ" id="champ-apikey" style="display:none;"><label>Cle CallMeBot</label><input name="apikey" placeholder="cle API"></div>
-        <button type="submit" class="btn-principal">+ Ajouter</button>
-      </div>
+<table>
+<tr><th>Nom</th><th>Canal</th><th>Contact</th><th>Statut</th><th>Actions</th></tr>
+{% for r in responsables %}
+<tr>
+  <td>{{ r.nom }}</td>
+  <td>{{ r.canal }}</td>
+  <td>{{ r.contact }}</td>
+  <td>{{ 'actif' if r.actif else 'desactive' }}</td>
+  <td>
+    <form class="inline" method="post" action="{{ url_for('destinataires.toggle_route', resp_id=r.id) }}" style="display:inline">
+      <button type="submit">{{ 'Desactiver' if r.actif else 'Reactiver' }}</button>
     </form>
-  </div>
-
-  <div class="carte">
-    <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:14px;">
-      <h3 style="margin:0;">Responsables enregistres</h3>
-      <input class="recherche" id="recherche-resp" placeholder="Rechercher..." oninput="filtrerResponsables()">
-    </div>
-    {% if responsables %}
-    <table class="table-pro" id="table-responsables">
-      <tr><th>Nom</th><th>Canal</th><th>Contact</th><th>Statut</th><th>Actions</th></tr>
-      {% for r in responsables %}
-      <tr>
-        <td><div class="cellule-nom"><span class="avatar">{{ r.nom[0]|upper }}</span> {{ r.nom }}</div></td>
-        <td>{{ '📧 Email' if r.canal == 'email' else '💬 WhatsApp' }}</td>
-        <td>{{ r.contact }}</td>
-        <td><span class="badge {{ 'actif' if r.actif else 'inactif' }}">{{ 'Actif' if r.actif else 'Desactive' }}</span></td>
-        <td class="actions-ligne">
-          <form method="post" action="{{ url_for('destinataires.toggle_route', resp_id=r.id) }}" style="display:inline">
-            <button type="submit" class="btn-fantome">{{ 'Desactiver' if r.actif else 'Reactiver' }}</button>
-          </form>
-          <form method="post" action="{{ url_for('destinataires.supprimer_route', resp_id=r.id) }}" style="display:inline"
-                onsubmit="return confirm('Supprimer {{ r.nom }} ?');">
-            <button type="submit" class="btn-danger">Supprimer</button>
-          </form>
-        </td>
-      </tr>
-      {% endfor %}
-    </table>
-    {% else %}
-    <div class="vide-etat">Aucun responsable enregistre pour l'instant. Les alertes utilisent la configuration par defaut (variables d'environnement).</div>
-    {% endif %}
-  </div>
-</main>
-
-<script>""" + JS_TEMA_ET_MENU + """
-function filtrerResponsables(){
-  const q = document.getElementById('recherche-resp').value.toLowerCase();
-  document.querySelectorAll('#table-responsables tr').forEach((ligne, i) => {
-    if(i === 0) return;
-    ligne.style.display = ligne.textContent.toLowerCase().includes(q) ? '' : 'none';
-  });
-}
-</script>
+    <form class="inline" method="post" action="{{ url_for('destinataires.supprimer_route', resp_id=r.id) }}" style="display:inline">
+      <button type="submit" class="danger">Supprimer</button>
+    </form>
+  </td>
+</tr>
+{% endfor %}
+</table>
 </body></html>
 """
 
@@ -223,10 +194,7 @@ function filtrerResponsables(){
 @destinataires_bp.route("/admin/responsables")
 @admin_required
 def page_responsables():
-    return render_template_string(
-        _PAGE, responsables=lister(), msg=request.args.get("msg"),
-        topbar=render_topbar("responsables"),
-    )
+    return render_template_string(_PAGE, responsables=lister(), msg=request.args.get("msg"))
 
 
 @destinataires_bp.route("/admin/responsables/ajouter", methods=["POST"])
@@ -240,6 +208,8 @@ def ajouter_route():
         return redirect(url_for("destinataires.page_responsables",
                                  msg="Champs manquants (cle CallMeBot requise pour whatsapp)."))
     ajouter(nom, canal, contact, apikey or None)
+    import audit
+    audit.consigner("ajout_responsable", cible=nom, details=f"{canal}:{contact}")
     return redirect(url_for("destinataires.page_responsables", msg=f"'{nom}' ajoute."))
 
 
@@ -247,6 +217,8 @@ def ajouter_route():
 @admin_required
 def toggle_route(resp_id):
     toggle_actif(resp_id)
+    import audit
+    audit.consigner("statut_responsable_modifie", cible=str(resp_id))
     return redirect(url_for("destinataires.page_responsables", msg="Statut mis a jour."))
 
 
@@ -254,4 +226,6 @@ def toggle_route(resp_id):
 @admin_required
 def supprimer_route(resp_id):
     supprimer(resp_id)
+    import audit
+    audit.consigner("suppression_responsable", cible=str(resp_id))
     return redirect(url_for("destinataires.page_responsables", msg="Supprime."))
