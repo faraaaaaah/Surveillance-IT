@@ -389,6 +389,48 @@ def logout():
     return redirect(url_for("auth.login"))
 
 
+def render_menu_utilisateur(page: str = "") -> str:
+    """Un seul bouton profil avec un menu deroulant (meme mecanisme que le
+    bouton 'Rapport' du dashboard : classes CSS .menu-deroulant/.menu-item,
+    deja definies dans dash.py) au lieu d'une rangee de boutons eparpilles.
+    A inserer a la place de <!--__BARRE_UTILISATEUR__--> dans une page.
+
+    page : nom de la page courante (ex. "dashboard") — permet d'omettre le
+    lien "Dashboard" dans le menu quand on y est deja, si cette fonction
+    est reutilisee sur d'autres pages plus tard."""
+    items = []
+    if page != "dashboard":
+        items.append(f'<a class="menu-item" style="display:block;text-decoration:none;" '
+                     f'href="{url_for("accueil")}">🏠 Dashboard</a>')
+
+    if current_user.is_admin:
+        items += [
+            f'<a class="menu-item" style="display:block;text-decoration:none;" '
+            f'href="{url_for("auth.admin_utilisateurs")}">👤 Utilisateurs</a>',
+            f'<a class="menu-item" style="display:block;text-decoration:none;" '
+            f'href="{url_for("destinataires.page_responsables")}">📣 Responsables</a>',
+            f'<a class="menu-item" style="display:block;text-decoration:none;" '
+            f'href="{url_for("parametres.page_parametres")}">✉️ Email</a>',
+            f'<a class="menu-item" style="display:block;text-decoration:none;" '
+            f'href="{url_for("assignations.page_assignations")}">🖥️ Machines</a>',
+            f'<a class="menu-item" style="display:block;text-decoration:none;" '
+            f'href="{url_for("groupes.page_liste")}">👥 Groupes</a>',
+            f'<a class="menu-item" style="display:block;text-decoration:none;" '
+            f'href="{url_for("audit.page_audit")}">📜 Audit</a>',
+        ]
+
+    items.append(f'<a class="menu-item" style="display:block;text-decoration:none;" '
+                 f'href="{url_for("auth.logout")}">🚪 Deconnexion</a>')
+
+    return (
+        '<div style="position:relative;">'
+        f'<button class="btn-periode" id="btn-profil" onclick="toggleMenuProfil()" '
+        f'style="padding:7px 12px;">👤 {current_user.username} ▾</button>'
+        f'<div id="menu-profil" class="menu-deroulant">{"".join(items)}</div>'
+        '</div>'
+    )
+
+
 _PAGE_CHANGER_MDP = """
 <!doctype html><html lang="fr"><head><meta charset="utf-8">
 <title>Changer le mot de passe</title>

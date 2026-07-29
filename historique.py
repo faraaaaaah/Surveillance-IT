@@ -457,14 +457,33 @@ def resoudre_incident_manuellement(incident_id: int):
     )
 
 
-def compter_incidents_par_statut(serveur: str = None) -> dict:
+def obtenir_serveur_incident(incident_id: int) -> str:
+    """Retourne le nom du serveur associe a un incident, ou None si
+    introuvable — utilise pour diffuser les evenements temps reel
+    (incident_resolu) uniquement aux utilisateurs autorises sur ce serveur."""
+    initialiser_db()
+    rows = _execute_with_lock("SELECT serveur FROM incidents WHERE id = ?", (incident_id,), fetch=True)
+    return rows[0]["serveur"] if rows else None
+
+
+def compter_incidents_par_statut(serveur: str = None, serveurs: list = None) -> dict:
     """Compte les incidents par statut sans charger toutes les lignes —
     utilise pour le petit compteur du dashboard, qui devient vite illisible
     si on essaie d'afficher TOUS les incidents un par un des que leur
-    nombre augmente."""
+    nombre augmente.
+
+    serveur : un seul serveur precis. serveurs : une liste (ex. machines
+    autorisees pour un compte restreint) — les deux sont exclusifs."""
     initialiser_db()
-    condition = "WHERE serveur = ?" if serveur else ""
-    params = (serveur,) if serveur else ()
+    if serveurs is not None:
+        if not serveurs:  # liste vide = aucune machine autorisee -> rien a compter
+            return {"ouvert": 0, "surveillance": 0, "resolu": 0}
+        placeholders = ",".join("?" for _ in serveurs)
+        condition, params = f"WHERE serveur IN ({placeholders})", tuple(serveurs)
+    elif serveur:
+        condition, params = "WHERE serveur = ?", (serveur,)
+    else:
+        condition, params = "", ()
     rows = _execute_with_lock(
         f"SELECT statut, COUNT(*) AS total FROM incidents {condition} GROUP BY statut",
         params, fetch=True
@@ -475,12 +494,20 @@ def compter_incidents_par_statut(serveur: str = None) -> dict:
     return compteur
 
 
-def lister_incidents(serveur: str = None, statut: str = None, limite: int = 50,
+def lister_incidents(serveur: str = None, serveurs: list = None, statut: str = None, limite: int = 50,
                       type_anomalie: str = None, niveau: str = None,
                       depuis: str = None, jusqua: str = None):
+    """serveur : un seul serveur precis. serveurs : une liste (ex. machines
+    autorisees pour un compte restreint) — les deux sont exclusifs."""
     initialiser_db()
+    if serveurs is not None and not serveurs:
+        return []  # aucune machine autorisee -> rien a lister
     conditions, params = [], []
-    if serveur:
+    if serveurs:
+        placeholders = ",".join("?" for _ in serveurs)
+        conditions.append(f"serveur IN ({placeholders})")
+        params.extend(serveurs)
+    elif serveur:
         conditions.append("serveur = ?")
         params.append(serveur)
     if statut:
