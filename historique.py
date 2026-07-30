@@ -767,6 +767,7 @@ def statistiques_base_connaissances(serveur: str = None) -> list:
     return resultat
 
 
+def contexte_pour_chatbot(serveur: str = None, jours: int = 7, limite: int = 20) -> str:
     """Construit un resume textuel de l'historique recent, a injecter dans
     le prompt du LLM pour repondre a des questions en langage naturel."""
     initialiser_db()
