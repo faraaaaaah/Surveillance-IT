@@ -16,3 +16,6 @@ werkzeug
 python-socketio
 eventlet
 torch
+xgboost
+prophet
+boto3
