@@ -1185,6 +1185,19 @@ def generer_previsions(serveur: str) -> List[Dict]:
     
     return [prevision]
 
+# provisionnement.py - Extension pour filtrer par groupes
+
+def generer_previsions_serveur(serveur: str, utilisateur) -> List[Dict]:
+    """Génère les prévisions pour un serveur si l'utilisateur y a accès"""
+    
+    # Vérifier l'accès via les groupes
+    autorisees = assignations.machines_autorisees(utilisateur)
+    if autorisees is not None and serveur not in autorisees:
+        return []  # Pas autorisé
+    
+    # Générer les prévisions normalement
+    return generer_previsions(serveur)
+
 def calculer_tendance(serveur: str, type_anomalie: str, fenetre_minutes: int = 30) -> Optional[Dict]:
     """Fonction de compatibilité"""
     try:

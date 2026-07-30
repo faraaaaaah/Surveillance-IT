@@ -1,21 +1,17 @@
 # -*- coding: utf-8 -*-
 """
-Module Assignations — Quelle machine chaque utilisateur peut voir
+Module Groupes — Accès par groupe plutôt que machine par machine
 -------------------------------------------------------------------
-Un compte 'user' ne doit voir QUE les machines qui lui sont accessibles ;
-un compte 'admin' voit tout, sans restriction.
+Approche "niveau entreprise" : au lieu d'assigner chaque machine à chaque
+utilisateur individuellement, on définit des groupes (ex. 'equipe-reseau',
+'datacenter-tunis'), on met des machines DANS le groupe, et on met des
+utilisateurs DANS le groupe. Un utilisateur voit l'union des machines de
+TOUS les groupes dont il est membre.
 
-Une machine devient visible pour un 'user' de DEUX facons, combinees :
-  1. Via un groupe (voir groupes.py) — l'approche normale/recommandee des
-     qu'il y a plus de quelques machines ou utilisateurs : on gere des
-     equipes, pas des cases a cocher individuelles.
-  2. Via une assignation DIRECTE (ce module) — reservee aux exceptions
-     ponctuelles (ex. un utilisateur qui a besoin d'une machine hors de
-     son groupe habituel, temporairement).
-
-Table stockee dans le meme auth.db que les comptes/responsables/config
-email — geree depuis une page web /admin/assignations (aucune ligne de
-commande, aucune variable d'environnement).
+Intégration avec provisionnement.py :
+- Les prévisions ML sont générées par serveur
+- Un utilisateur ne voit que les prévisions des machines de ses groupes
+- Les administrateurs voient toutes les machines
 """
 
 import os
@@ -25,11 +21,11 @@ import time
 from datetime import datetime
 from contextlib import contextmanager
 
-from flask import Blueprint, request, redirect, url_for, render_template_string
+from flask import Blueprint, request, redirect, url_for, render_template_string, flash
 
 import historique
 import auth
-from auth import admin_required
+from auth import admin_required, login_required
 import audit
 
 CHEMIN_DB = os.path.join(historique.DOSSIER_DATA, "auth.db")
@@ -71,153 +67,569 @@ def _execute(sql, params=None, fetch=False, commit=True):
 
 
 def initialiser_db():
+    """Initialise la base de données des groupes"""
     with _connexion() as conn:
+        # Table des groupes
         conn.execute("""
-            CREATE TABLE IF NOT EXISTS assignations (
+            CREATE TABLE IF NOT EXISTS groupes (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
-                user_id INTEGER NOT NULL,
-                machine TEXT NOT NULL,
-                cree_le TEXT NOT NULL,
-                UNIQUE(user_id, machine)
+                nom TEXT UNIQUE NOT NULL,
+                description TEXT,
+                cree_le TEXT NOT NULL
             )
         """)
+        
+        # Table des machines par groupe
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS groupe_machines (
+                groupe_id INTEGER NOT NULL REFERENCES groupes(id) ON DELETE CASCADE,
+                machine TEXT NOT NULL,
+                UNIQUE(groupe_id, machine)
+            )
+        """)
+        
+        # Table des utilisateurs par groupe
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS groupe_utilisateurs (
+                groupe_id INTEGER NOT NULL REFERENCES groupes(id) ON DELETE CASCADE,
+                user_id INTEGER NOT NULL,
+                UNIQUE(groupe_id, user_id)
+            )
+        """)
+        
         conn.commit()
 
 
-def assigner(user_id: int, machine: str):
+# ============================================================================
+# CRUD GROUPES
+# ============================================================================
+
+def creer_groupe(nom: str, description: str = "") -> bool:
+    """Crée un nouveau groupe"""
     initialiser_db()
     try:
         _execute(
-            "INSERT INTO assignations (user_id, machine, cree_le) VALUES (?, ?, ?)",
-            (user_id, machine, datetime.now().strftime("%Y-%m-%d %H:%M:%S")),
+            "INSERT INTO groupes (nom, description, cree_le) VALUES (?, ?, ?)",
+            (nom.strip(), description.strip(), datetime.now().strftime("%Y-%m-%d %H:%M:%S")),
         )
+        return True
     except sqlite3.IntegrityError:
-        pass  # deja assignee, rien a faire
+        return False
 
 
-def retirer(user_id: int, machine: str):
-    _execute("DELETE FROM assignations WHERE user_id = ? AND machine = ?", (user_id, machine))
-
-
-def machines_de(user_id: int) -> set:
+def supprimer_groupe(groupe_id: int):
+    """Supprime un groupe et ses associations"""
     initialiser_db()
-    rows = _execute("SELECT machine FROM assignations WHERE user_id = ?", (user_id,), fetch=True)
+    with _connexion() as conn:
+        conn.execute("DELETE FROM groupe_machines WHERE groupe_id = ?", (groupe_id,))
+        conn.execute("DELETE FROM groupe_utilisateurs WHERE groupe_id = ?", (groupe_id,))
+        conn.execute("DELETE FROM groupes WHERE id = ?", (groupe_id,))
+        conn.commit()
+
+
+def lister_groupes() -> list:
+    """Liste tous les groupes"""
+    initialiser_db()
+    rows = _execute("SELECT * FROM groupes ORDER BY nom", fetch=True)
+    return [dict(r) for r in rows] if rows else []
+
+
+def obtenir_groupe(groupe_id: int) -> dict | None:
+    """Récupère un groupe par son ID"""
+    initialiser_db()
+    rows = _execute("SELECT * FROM groupes WHERE id = ?", (groupe_id,), fetch=True)
+    return dict(rows[0]) if rows else None
+
+
+def modifier_groupe(groupe_id: int, nom: str, description: str = "") -> bool:
+    """Modifie un groupe"""
+    try:
+        _execute(
+            "UPDATE groupes SET nom = ?, description = ? WHERE id = ?",
+            (nom.strip(), description.strip(), groupe_id)
+        )
+        return True
+    except sqlite3.IntegrityError:
+        return False
+
+
+# ============================================================================
+# MACHINES DANS UN GROUPE
+# ============================================================================
+
+def ajouter_machine(groupe_id: int, machine: str):
+    """Ajoute une machine à un groupe"""
+    initialiser_db()
+    try:
+        _execute("INSERT INTO groupe_machines (groupe_id, machine) VALUES (?, ?)", (groupe_id, machine))
+    except sqlite3.IntegrityError:
+        pass  # Déjà présente
+
+
+def retirer_machine(groupe_id: int, machine: str):
+    """Retire une machine d'un groupe"""
+    _execute("DELETE FROM groupe_machines WHERE groupe_id = ? AND machine = ?", (groupe_id, machine))
+
+
+def machines_du_groupe(groupe_id: int) -> set:
+    """Récupère toutes les machines d'un groupe"""
+    initialiser_db()
+    rows = _execute("SELECT machine FROM groupe_machines WHERE groupe_id = ?", (groupe_id,), fetch=True)
     return {r["machine"] for r in rows} if rows else set()
 
 
-def machines_autorisees(utilisateur) -> set | None:
-    """None = pas de restriction (admin, voit tout).
-    set() ou {machines...} = restriction stricte a l'union des machines
-    obtenues via les groupes de l'utilisateur ET ses assignations directes
-    (role 'user')."""
-    if utilisateur.is_admin:
-        return None
-    import groupes  # import tardif : evite un cycle au chargement du module
-    user_id = int(utilisateur.id)
-    return machines_de(user_id) | groupes.machines_via_groupes(user_id)
+def toutes_machines_avec_groupes() -> dict:
+    """Récupère toutes les machines avec leurs groupes"""
+    initialiser_db()
+    rows = _execute("""
+        SELECT gm.machine, g.nom as groupe_nom, g.id as groupe_id
+        FROM groupe_machines gm
+        JOIN groupes g ON g.id = gm.groupe_id
+        ORDER BY gm.machine
+    """, fetch=True)
+    
+    result = {}
+    for r in rows:
+        machine = r["machine"]
+        if machine not in result:
+            result[machine] = []
+        result[machine].append({
+            'groupe_id': r["groupe_id"],
+            'groupe_nom': r["groupe_nom"]
+        })
+    return result
 
 
-# ---------------------------------------------------------------------------
-# Page d'administration
-# ---------------------------------------------------------------------------
+# ============================================================================
+# UTILISATEURS DANS UN GROUPE
+# ============================================================================
 
-assignations_bp = Blueprint("assignations", __name__)
+def ajouter_utilisateur(groupe_id: int, user_id: int):
+    """Ajoute un utilisateur à un groupe"""
+    initialiser_db()
+    try:
+        _execute("INSERT INTO groupe_utilisateurs (groupe_id, user_id) VALUES (?, ?)", (groupe_id, user_id))
+    except sqlite3.IntegrityError:
+        pass  # Déjà présent
 
-_PAGE = """
+
+def retirer_utilisateur(groupe_id: int, user_id: int):
+    """Retire un utilisateur d'un groupe"""
+    _execute("DELETE FROM groupe_utilisateurs WHERE groupe_id = ? AND user_id = ?", (groupe_id, user_id))
+
+
+def utilisateurs_du_groupe(groupe_id: int) -> set:
+    """Récupère tous les utilisateurs d'un groupe"""
+    initialiser_db()
+    rows = _execute("SELECT user_id FROM groupe_utilisateurs WHERE groupe_id = ?", (groupe_id,), fetch=True)
+    return {r["user_id"] for r in rows} if rows else set()
+
+
+def groupes_de_utilisateur(user_id: int) -> list:
+    """Récupère tous les groupes d'un utilisateur"""
+    initialiser_db()
+    rows = _execute("""
+        SELECT g.* FROM groupes g
+        JOIN groupe_utilisateurs gu ON gu.groupe_id = g.id
+        WHERE gu.user_id = ?
+        ORDER BY g.nom
+    """, (user_id,), fetch=True)
+    return [dict(r) for r in rows] if rows else []
+
+
+def machines_via_groupes(user_id: int) -> set:
+    """
+    Union des machines de TOUS les groupes dont l'utilisateur est membre.
+    Cette fonction est appelée par assignations.py pour combiner
+    avec les assignations individuelles directes.
+    """
+    initialiser_db()
+    rows = _execute("""
+        SELECT DISTINCT gm.machine FROM groupe_machines gm
+        JOIN groupe_utilisateurs gu ON gu.groupe_id = gm.groupe_id
+        WHERE gu.user_id = ?
+    """, (user_id,), fetch=True)
+    return {r["machine"] for r in rows} if rows else set()
+
+
+# ============================================================================
+# STATISTIQUES
+# ============================================================================
+
+def statistiques_groupes() -> dict:
+    """Retourne des statistiques sur les groupes"""
+    initialiser_db()
+    
+    total_groupes = len(lister_groupes())
+    
+    # Machines totales
+    machines_rows = _execute("SELECT COUNT(DISTINCT machine) as total FROM groupe_machines", fetch=True)
+    total_machines = machines_rows[0]["total"] if machines_rows else 0
+    
+    # Utilisateurs totaux
+    users_rows = _execute("SELECT COUNT(DISTINCT user_id) as total FROM groupe_utilisateurs", fetch=True)
+    total_utilisateurs = users_rows[0]["total"] if users_rows else 0
+    
+    return {
+        'total_groupes': total_groupes,
+        'total_machines': total_machines,
+        'total_utilisateurs': total_utilisateurs
+    }
+
+
+# ============================================================================
+# ROUTES FLASK
+# ============================================================================
+
+groupes_bp = Blueprint("groupes", __name__)
+
+_PAGE_LISTE = """
 <!doctype html><html lang="fr"><head><meta charset="utf-8">
-<title>Assignation des machines</title>
+<title>Groupes - SENTINEL</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
 <style>
-  body{font-family:system-ui,sans-serif;background:#0f1115;color:#e6e6e6;padding:2rem;max-width:820px;margin:0 auto}
-  a{color:#3b82f6}
-  .msg{color:#4ade80;margin-bottom:1rem}
-  .bloc{background:#1a1d24;border:1px solid #2a2d34;border-radius:8px;padding:1rem 1.2rem;margin-bottom:1rem}
-  .bloc h3{margin:0 0 .6rem;font-size:1rem}
-  .machine{display:inline-flex;align-items:center;gap:.4rem;background:#14161b;border:1px solid #2a2d34;
-           border-radius:6px;padding:.35rem .7rem;margin:.2rem .3rem .2rem 0}
-  .machine.assignee{border-color:#3b82f6;background:rgba(59,130,246,.12)}
-  .machine.via-groupe{border-color:#8b5cf6;background:rgba(139,92,246,.12)}
-  button{padding:.3rem .7rem;border:0;border-radius:6px;background:#3b82f6;color:#fff;cursor:pointer;font-size:.8rem}
-  button.retirer{background:#e01e5a}
-  button[disabled]{opacity:.4;cursor:not-allowed}
-  .vide{color:#9aa0aa;font-size:.85rem}
-  .badge{padding:.1rem .5rem;border-radius:4px;font-size:.75rem;background:#333}
-  .aide{background:#1a1d24;border:1px solid #2a2d34;border-radius:8px;padding:.8rem 1.1rem;font-size:.85rem;color:#9aa0aa;margin-bottom:1.2rem;line-height:1.5}
+""" + auth.TOKENS_CSS + """
+  .grille-groupes{display:grid; grid-template-columns:repeat(auto-fill, minmax(320px,1fr)); gap:16px; margin:16px 0;}
+  .carte-groupe{background:var(--panel); border:1px solid var(--border); border-radius:12px; padding:18px;}
+  .carte-groupe h3{margin:0 0 6px; font-size:15px; display:flex; justify-content:space-between; align-items:center;}
+  .carte-groupe .desc{color:var(--muted); font-size:12.5px; margin:0 0 10px;}
+  .carte-groupe .stats{display:flex; gap:16px; font-size:12px; color:var(--muted); margin-bottom:10px;}
+  .carte-groupe .stats span{display:flex; align-items:center; gap:4px;}
+  .actions{display:flex; gap:6px; flex-wrap:wrap;}
+  .btn{display:inline-block; padding:6px 14px; border-radius:6px; border:1px solid var(--border); 
+       background:var(--panel2); color:var(--text); font-size:12px; cursor:pointer; text-decoration:none;}
+  .btn-primary{background:var(--accent); color:#08131f; border-color:var(--accent);}
+  .btn-danger{background:rgba(248,81,73,.12); color:var(--crit); border-color:rgba(248,81,73,.3);}
+  .btn-small{padding:4px 10px; font-size:11px;}
+  .stats-globales{display:grid; grid-template-columns:repeat(auto-fit, minmax(150px,1fr)); gap:12px; margin:16px 0 24px;}
+  .stat-item{background:var(--panel); border:1px solid var(--border); border-radius:10px; padding:14px; text-align:center;}
+  .stat-item .nombre{font-size:24px; font-weight:700;}
+  .stat-item .label{font-size:11px; color:var(--muted);}
+  .vide{color:var(--muted); text-align:center; padding:40px 0;}
 </style></head><body>
-<p><a href="{{ url_for('accueil') }}">&larr; Retour au dashboard</a></p>
-<h1>Assignation des machines</h1>
-<div class="aide">
-  Pour gerer l'acces d'une <b>equipe entiere</b> a un ensemble de machines, utilise plutot
-  <a href="{{ url_for('groupes.page_liste') }}">les groupes</a> — plus simple des que tu as
-  plusieurs utilisateurs ou plusieurs machines. Cette page sert pour des exceptions
-  ponctuelles : donner UNE machine en plus a UN utilisateur, hors de son groupe habituel.
-</div>
-{% if msg %}<div class="msg">{{ msg }}</div>{% endif %}
+<script>(function(){ if(localStorage.getItem('sentinel-theme') === 'light'){ document.body.classList.add('light'); } })();</script>
 
-{% for u in utilisateurs %}
-<div class="bloc">
-  <h3>{{ u.username }} <span class="badge">{{ u.role }}</span></h3>
-  {% if u.role == 'admin' %}
-    <p class="vide">Voit toutes les machines (admin).</p>
-  {% elif toutes_machines %}
-    {% for m in toutes_machines %}
-      {% set assignee_directe = m in assignations.get(u.id, []) %}
-      {% set via_groupe = m in via_groupes.get(u.id, []) %}
-      <span class="machine {{ 'assignee' if assignee_directe else ('via-groupe' if via_groupe else '') }}">
-        {{ m }}{% if via_groupe %} <span class="badge">groupe</span>{% endif %}
-        {% if via_groupe and not assignee_directe %}
-          <button disabled title="Deja visible via un groupe">deja visible</button>
-        {% else %}
-        <form method="post" style="display:inline;margin:0"
-              action="{{ url_for('assignations.retirer_route' if assignee_directe else 'assignations.assigner_route', user_id=u.id) }}">
-          <input type="hidden" name="machine" value="{{ m }}">
-          <button type="submit" class="{{ 'retirer' if assignee_directe else '' }}">{{ '✕ Retirer' if assignee_directe else '+ Assigner' }}</button>
-        </form>
-        {% endif %}
-      </span>
-    {% endfor %}
-  {% else %}
-    <p class="vide">Aucune machine detectee pour le moment (attends qu'au moins une machine envoie des metriques).</p>
+""" + auth.render_topbar("groupes") + """
+
+<main class="contenu">
+  <div class="page-entete">
+    <h1>👥 Groupes d'accès</h1>
+    <p>Gérez les groupes d'utilisateurs et les machines qu'ils peuvent voir.</p>
+  </div>
+
+  <div class="stats-globales">
+    <div class="stat-item">
+      <div class="nombre">{{ stats.total_groupes }}</div>
+      <div class="label">Groupes</div>
+    </div>
+    <div class="stat-item">
+      <div class="nombre">{{ stats.total_machines }}</div>
+      <div class="label">Machines assignées</div>
+    </div>
+    <div class="stat-item">
+      <div class="nombre">{{ stats.total_utilisateurs }}</div>
+      <div class="label">Utilisateurs</div>
+    </div>
+  </div>
+
+  {% if msg %}
+  <div class="toast">{{ msg }}</div>
   {% endif %}
-</div>
-{% endfor %}
+
+  <div class="carte">
+    <h3 style="margin:0 0 12px;">Créer un nouveau groupe</h3>
+    <form method="post" action="{{ url_for('groupes.creer_route') }}" style="display:flex; gap:10px; flex-wrap:wrap;">
+      <input name="nom" placeholder="Nom du groupe (ex: equipe-reseau)" required style="flex:1; min-width:200px;">
+      <input name="description" placeholder="Description (optionnel)" style="flex:2; min-width:250px;">
+      <button type="submit" class="btn btn-primary">+ Créer</button>
+    </form>
+  </div>
+
+  {% if groupes %}
+  <div class="grille-groupes">
+    {% for g in groupes %}
+    <div class="carte-groupe">
+      <h3>
+        <span>{{ g.nom }}</span>
+        <span style="font-size:11px; color:var(--muted); font-weight:normal;">
+          #{{ g.id }}
+        </span>
+      </h3>
+      <p class="desc">{{ g.description or 'Aucune description' }}</p>
+      <div class="stats">
+        <span>🖥️ {{ g.nb_machines }} machine(s)</span>
+        <span>👤 {{ g.nb_utilisateurs }} utilisateur(s)</span>
+        <span>📅 {{ g.cree_le[:10] }}</span>
+      </div>
+      <div class="actions">
+        <a href="{{ url_for('groupes.page_detail', groupe_id=g.id) }}" class="btn btn-primary btn-small">Gérer</a>
+        <form method="post" action="{{ url_for('groupes.supprimer_route', groupe_id=g.id) }}" style="display:inline;" 
+              onsubmit="return confirm('Supprimer le groupe {{ g.nom }} ?');">
+          <button type="submit" class="btn btn-danger btn-small">Supprimer</button>
+        </form>
+      </div>
+    </div>
+    {% endfor %}
+  </div>
+  {% else %}
+  <div class="vide">
+    <div style="font-size:48px; margin-bottom:12px;">👥</div>
+    <p>Aucun groupe pour le moment.</p>
+    <p style="font-size:13px;">Créez votre premier groupe ci-dessus pour commencer à organiser vos utilisateurs et machines.</p>
+  </div>
+  {% endif %}
+</main>
+
+<script>""" + auth.JS_TEMA_ET_MENU + """</script>
+</body></html>
+"""
+
+_PAGE_DETAIL = """
+<!doctype html><html lang="fr"><head><meta charset="utf-8">
+<title>Groupe {{ groupe.nom }} - SENTINEL</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<style>
+""" + auth.TOKENS_CSS + """
+  .deux-colonnes{display:grid; grid-template-columns:1fr 1fr; gap:20px; margin:16px 0;}
+  .colonne{background:var(--panel); border:1px solid var(--border); border-radius:12px; padding:18px;}
+  .colonne h3{margin:0 0 12px; font-size:14px; display:flex; justify-content:space-between; align-items:center;}
+  .colonne .badge{font-size:11px; font-weight:normal; background:var(--panel2); padding:2px 10px; border-radius:10px; color:var(--muted);}
+  .item{display:flex; justify-content:space-between; align-items:center; padding:8px 0; border-bottom:1px solid var(--border);}
+  .item:last-child{border-bottom:none;}
+  .item .nom{font-size:13px;}
+  .item .tag{font-size:11px; color:var(--muted); background:var(--panel2); padding:2px 8px; border-radius:4px;}
+  .btn-small{padding:4px 10px; font-size:11px; border-radius:4px; border:1px solid var(--border); background:var(--panel2); color:var(--text); cursor:pointer;}
+  .btn-danger-small{padding:4px 10px; font-size:11px; border-radius:4px; border:1px solid rgba(248,81,73,.3); background:rgba(248,81,73,.1); color:var(--crit); cursor:pointer;}
+  .btn-primary-small{padding:4px 10px; font-size:11px; border-radius:4px; border:1px solid var(--accent); background:var(--accent); color:#08131f; cursor:pointer;}
+  .form-ajout{display:flex; gap:8px; margin-top:12px; flex-wrap:wrap;}
+  .form-ajout select{flex:1; min-width:120px; padding:6px 8px; border-radius:6px; border:1px solid var(--border); background:var(--bg); color:var(--text);}
+  .vide-item{color:var(--muted); font-size:13px; padding:12px 0;}
+  .retour{margin-bottom:16px;}
+  .retour a{color:var(--accent); text-decoration:none;}
+  .infos-groupe{background:var(--panel); border:1px solid var(--border); border-radius:12px; padding:16px 18px; margin-bottom:16px; display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:12px;}
+  .infos-groupe .titre{font-size:18px; font-weight:700;}
+  .infos-groupe .desc{color:var(--muted); font-size:13px;}
+  @media (max-width: 768px){ .deux-colonnes{grid-template-columns:1fr;} }
+</style></head><body>
+<script>(function(){ if(localStorage.getItem('sentinel-theme') === 'light'){ document.body.classList.add('light'); } })();</script>
+
+""" + auth.render_topbar("groupes") + """
+
+<main class="contenu">
+  <div class="retour">
+    <a href="{{ url_for('groupes.page_liste') }}">&larr; Retour aux groupes</a>
+  </div>
+
+  <div class="infos-groupe">
+    <div>
+      <div class="titre">👥 {{ groupe.nom }}</div>
+      <div class="desc">{{ groupe.description or 'Aucune description' }}</div>
+    </div>
+    <div style="font-size:13px; color:var(--muted);">
+      Créé le {{ groupe.cree_le[:10] }}
+    </div>
+  </div>
+
+  {% if msg %}
+  <div class="toast">{{ msg }}</div>
+  {% endif %}
+
+  <div class="deux-colonnes">
+    <!-- Colonne Machines -->
+    <div class="colonne">
+      <h3>
+        🖥️ Machines
+        <span class="badge">{{ machines|length }}</span>
+      </h3>
+      
+      {% if machines %}
+        {% for m in machines %}
+        <div class="item">
+          <span class="nom">{{ m }}</span>
+          <form method="post" action="{{ url_for('groupes.retirer_machine_route', groupe_id=groupe.id) }}" style="display:inline;">
+            <input type="hidden" name="machine" value="{{ m }}">
+            <button type="submit" class="btn-danger-small" onclick="return confirm('Retirer {{ m }} du groupe ?');">✕ Retirer</button>
+          </form>
+        </div>
+        {% endfor %}
+      {% else %}
+        <div class="vide-item">Aucune machine dans ce groupe</div>
+      {% endif %}
+      
+      {% if machines_disponibles %}
+      <form class="form-ajout" method="post" action="{{ url_for('groupes.ajouter_machine_route', groupe_id=groupe.id) }}">
+        <select name="machine">
+          {% for m in machines_disponibles %}
+          <option value="{{ m }}">{{ m }}</option>
+          {% endfor %}
+        </select>
+        <button type="submit" class="btn-primary-small">+ Ajouter</button>
+      </form>
+      {% endif %}
+    </div>
+
+    <!-- Colonne Utilisateurs -->
+    <div class="colonne">
+      <h3>
+        👤 Utilisateurs
+        <span class="badge">{{ utilisateurs_membres|length }}</span>
+      </h3>
+      
+      {% if utilisateurs_membres %}
+        {% for u in utilisateurs_membres %}
+        <div class="item">
+          <span class="nom">{{ u.username }} <span class="tag">{{ u.role }}</span></span>
+          <form method="post" action="{{ url_for('groupes.retirer_utilisateur_route', groupe_id=groupe.id) }}" style="display:inline;">
+            <input type="hidden" name="user_id" value="{{ u.id }}">
+            <button type="submit" class="btn-danger-small" onclick="return confirm('Retirer {{ u.username }} du groupe ?');">✕ Retirer</button>
+          </form>
+        </div>
+        {% endfor %}
+      {% else %}
+        <div class="vide-item">Aucun utilisateur dans ce groupe</div>
+      {% endif %}
+      
+      {% if utilisateurs_disponibles %}
+      <form class="form-ajout" method="post" action="{{ url_for('groupes.ajouter_utilisateur_route', groupe_id=groupe.id) }}">
+        <select name="user_id">
+          {% for u in utilisateurs_disponibles %}
+          <option value="{{ u.id }}">{{ u.username }} ({{ u.role }})</option>
+          {% endfor %}
+        </select>
+        <button type="submit" class="btn-primary-small">+ Ajouter</button>
+      </form>
+      {% endif %}
+    </div>
+  </div>
+</main>
+
+<script>""" + auth.JS_TEMA_ET_MENU + """</script>
 </body></html>
 """
 
 
-@assignations_bp.route("/admin/assignations")
+@groupes_bp.route("/admin/groupes")
 @admin_required
-def page_assignations():
-    import groupes
-    utilisateurs = auth.lister_utilisateurs()
-    toutes_machines = [s["nom"] for s in historique.lister_serveurs()]
-    assignations_par_user = {u["id"]: machines_de(u["id"]) for u in utilisateurs}
-    via_groupes_par_user = {u["id"]: groupes.machines_via_groupes(u["id"]) for u in utilisateurs}
+def page_liste():
+    """Page de liste des groupes"""
+    groupes = lister_groupes()
+    for g in groupes:
+        g["nb_machines"] = len(machines_du_groupe(g["id"]))
+        g["nb_utilisateurs"] = len(utilisateurs_du_groupe(g["id"]))
+    
+    stats = statistiques_groupes()
+    
     return render_template_string(
-        _PAGE, utilisateurs=utilisateurs, toutes_machines=toutes_machines,
-        assignations=assignations_par_user, via_groupes=via_groupes_par_user,
-        msg=request.args.get("msg"),
+        _PAGE_LISTE,
+        groupes=groupes,
+        stats=stats,
+        msg=request.args.get("msg")
     )
 
 
-@assignations_bp.route("/admin/assignations/<int:user_id>/assigner", methods=["POST"])
+@groupes_bp.route("/admin/groupes/creer", methods=["POST"])
 @admin_required
-def assigner_route(user_id):
-    machine = request.form.get("machine", "").strip()
-    if machine:
-        assigner(user_id, machine)
-        cible = auth._get_user_by_id(user_id)
-        audit.consigner("assignation_machine_directe",
-                         cible=cible["username"] if cible else str(user_id), details=machine)
-    return redirect(url_for("assignations.page_assignations", msg=f"'{machine}' assignee."))
+def creer_route():
+    """Crée un nouveau groupe"""
+    nom = request.form.get("nom", "").strip()
+    description = request.form.get("description", "").strip()
+    
+    if not nom:
+        return redirect(url_for("groupes.page_liste", msg="Nom du groupe requis."))
+    
+    if creer_groupe(nom, description):
+        audit.consigner("creation_groupe", cible=nom)
+        return redirect(url_for("groupes.page_liste", msg=f" Groupe '{nom}' créé."))
+    
+    return redirect(url_for("groupes.page_liste", msg=f" Le groupe '{nom}' existe déjà."))
 
 
-@assignations_bp.route("/admin/assignations/<int:user_id>/retirer", methods=["POST"])
+@groupes_bp.route("/admin/groupes/<int:groupe_id>/supprimer", methods=["POST"])
 @admin_required
-def retirer_route(user_id):
+def supprimer_route(groupe_id):
+    """Supprime un groupe"""
+    g = obtenir_groupe(groupe_id)
+    supprimer_groupe(groupe_id)
+    if g:
+        audit.consigner("suppression_groupe", cible=g["nom"])
+    return redirect(url_for("groupes.page_liste", msg=f" Groupe '{g['nom'] if g else ''}' supprimé."))
+
+
+@groupes_bp.route("/admin/groupes/<int:groupe_id>")
+@admin_required
+def page_detail(groupe_id):
+    """Page de détail d'un groupe"""
+    groupe = obtenir_groupe(groupe_id)
+    if not groupe:
+        return redirect(url_for("groupes.page_liste", msg=" Groupe introuvable."))
+    
+    machines = sorted(machines_du_groupe(groupe_id))
+    toutes_machines = [s["nom"] for s in historique.lister_serveurs()]
+    machines_disponibles = [m for m in toutes_machines if m not in machines]
+    
+    membres_ids = utilisateurs_du_groupe(groupe_id)
+    tous_users = auth.lister_utilisateurs()
+    utilisateurs_membres = [u for u in tous_users if u["id"] in membres_ids]
+    utilisateurs_disponibles = [u for u in tous_users if u["id"] not in membres_ids]
+    
+    return render_template_string(
+        _PAGE_DETAIL,
+        groupe=groupe,
+        machines=machines,
+        machines_disponibles=machines_disponibles,
+        utilisateurs_membres=utilisateurs_membres,
+        utilisateurs_disponibles=utilisateurs_disponibles,
+        msg=request.args.get("msg")
+    )
+
+
+@groupes_bp.route("/admin/groupes/<int:groupe_id>/machines/ajouter", methods=["POST"])
+@admin_required
+def ajouter_machine_route(groupe_id):
+    """Ajoute une machine à un groupe"""
     machine = request.form.get("machine", "").strip()
     if machine:
-        retirer(user_id, machine)
-        cible = auth._get_user_by_id(user_id)
-        audit.consigner("retrait_machine_directe",
-                         cible=cible["username"] if cible else str(user_id), details=machine)
-    return redirect(url_for("assignations.page_assignations", msg=f"'{machine}' retiree."))
+        ajouter_machine(groupe_id, machine)
+        g = obtenir_groupe(groupe_id)
+        audit.consigner("ajout_machine_groupe", cible=g["nom"] if g else str(groupe_id), details=machine)
+    return redirect(url_for("groupes.page_detail", groupe_id=groupe_id, msg=f" Machine '{machine}' ajoutée."))
+
+
+@groupes_bp.route("/admin/groupes/<int:groupe_id>/machines/retirer", methods=["POST"])
+@admin_required
+def retirer_machine_route(groupe_id):
+    """Retire une machine d'un groupe"""
+    machine = request.form.get("machine", "").strip()
+    if machine:
+        retirer_machine(groupe_id, machine)
+        g = obtenir_groupe(groupe_id)
+        audit.consigner("retrait_machine_groupe", cible=g["nom"] if g else str(groupe_id), details=machine)
+    return redirect(url_for("groupes.page_detail", groupe_id=groupe_id, msg=f" Machine '{machine}' retirée."))
+
+
+@groupes_bp.route("/admin/groupes/<int:groupe_id>/utilisateurs/ajouter", methods=["POST"])
+@admin_required
+def ajouter_utilisateur_route(groupe_id):
+    """Ajoute un utilisateur à un groupe"""
+    user_id = request.form.get("user_id", type=int)
+    if user_id:
+        ajouter_utilisateur(groupe_id, user_id)
+        g = obtenir_groupe(groupe_id)
+        user = auth._get_user_by_id(user_id)
+        audit.consigner("ajout_utilisateur_groupe", cible=g["nom"] if g else str(groupe_id), 
+                       details=f"user={user['username'] if user else user_id}")
+    return redirect(url_for("groupes.page_detail", groupe_id=groupe_id, msg=" Utilisateur ajouté."))
+
+
+@groupes_bp.route("/admin/groupes/<int:groupe_id>/utilisateurs/retirer", methods=["POST"])
+@admin_required
+def retirer_utilisateur_route(groupe_id):
+    """Retire un utilisateur d'un groupe"""
+    user_id = request.form.get("user_id", type=int)
+    if user_id:
+        retirer_utilisateur(groupe_id, user_id)
+        g = obtenir_groupe(groupe_id)
+        user = auth._get_user_by_id(user_id)
+        audit.consigner("retrait_utilisateur_groupe", cible=g["nom"] if g else str(groupe_id),
+                       details=f"user={user['username'] if user else user_id}")
+    return redirect(url_for("groupes.page_detail", groupe_id=groupe_id, msg=" Utilisateur retiré."))
