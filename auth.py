@@ -478,6 +478,9 @@ def render_menu_utilisateur(page_active: str = None) -> str:
     lien_connaissances = (
         f'<a href="{url_for("base_connaissances.page_base_connaissances")}" class="item">📚 Base de connaissances</a>'
     )
+    lien_provisionnement = (
+        f'<a href="{url_for("provisionnement.page_provisionnement")}" class="item">📈 Provisionnement</a>'
+    )
     return f"""
     <div class="menu-user" id="menu-utilisateur">
       <button class="menu-user-btn" type="button">
@@ -492,6 +495,7 @@ def render_menu_utilisateur(page_active: str = None) -> str:
         </div>
         <a href="{url_for('auth.changer_mot_de_passe_route')}" class="item">🔑 Mon profil</a>
         {lien_connaissances}
+        {lien_provisionnement}
         <div class="separateur"></div>
         {liens_admin}
         <a href="{url_for('auth.logout')}" class="item danger">🚪 Deconnexion</a>
@@ -520,6 +524,7 @@ def render_topbar(page_active: str) -> str:
         <nav class="topbar-nav">
           <a href="{url_for('accueil')}" class="{cls('dashboard')}">Tableau de bord</a>
           <a href="{url_for('base_connaissances.page_base_connaissances')}" class="{cls('base_connaissances')}">Base de connaissances</a>
+          <a href="{url_for('provisionnement.page_provisionnement')}" class="{cls('provisionnement')}">Provisionnement</a>
           {liens_admin_nav}
         </nav>
       </div>
