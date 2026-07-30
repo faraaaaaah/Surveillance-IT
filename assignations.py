@@ -309,7 +309,7 @@ _PAGE_LISTE = """
 </style></head><body>
 <script>(function(){ if(localStorage.getItem('sentinel-theme') === 'light'){ document.body.classList.add('light'); } })();</script>
 
-""" + auth.render_topbar("groupes") + """
+""" + "{{ topbar|safe }}" + """
 
 <main class="contenu">
   <div class="page-entete">
@@ -413,7 +413,7 @@ _PAGE_DETAIL = """
 </style></head><body>
 <script>(function(){ if(localStorage.getItem('sentinel-theme') === 'light'){ document.body.classList.add('light'); } })();</script>
 
-""" + auth.render_topbar("groupes") + """
+""" + "{{ topbar|safe }}" + """
 
 <main class="contenu">
   <div class="retour">
