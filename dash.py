@@ -42,6 +42,8 @@ from groupes import groupes_bp
 import audit
 from audit import audit_bp
 from base_connaissances import base_connaissances_bp
+import provisionnement
+from provisionnement import provisionnement_bp
 from flask_socketio import join_room, emit as socketio_emit_local
 
 app = Flask(__name__)
@@ -58,6 +60,7 @@ app.register_blueprint(assignations_bp)
 app.register_blueprint(groupes_bp)
 app.register_blueprint(audit_bp)
 app.register_blueprint(base_connaissances_bp)
+app.register_blueprint(provisionnement_bp)
 
 
 @app.before_request
@@ -199,6 +202,13 @@ def _traiter_anomalies_en_arriere_plan(serveur: str, m: dict, anomalies: list, e
         historique.enregistrer_anomalie(m, anomalies, explication_combinee, serveur=serveur,
                                          explications_par_type=explications_par_type)
 
+        # Provisionnement : si une prevision etait active pour un de ces
+        # types sur ce serveur, elle vient de se confirmer (l'anomalie
+        # reelle est arrivee) - on la relie a l'incident pour le suivi de
+        # fiabilite (voir historique.statistiques_fiabilite_previsions).
+        types_survenus = {historique.type_anomalie_de(a) for a in anomalies}
+        historique.confirmer_previsions_pour_anomalies(serveur, types_survenus)
+
         with _verrou:
             etat = _etat_serveurs.setdefault(serveur, _etat_par_defaut())
             etat["explication"] = explication_combinee
@@ -248,6 +258,50 @@ def boucle_resolution_auto():
             historique.nettoyer_vieilles_mesures()
 
         time.sleep(60)
+
+def _envoyer_alerte_preventive(serveur: str, prevision: dict, phrase: str):
+    """Diffuse une prevision nouvellement creee sur les memes canaux que
+    les anomalies reelles (Slack/SMS/email/bureau), avec un message
+    distinct (🟡, "prevision") pour que l'employe comprenne tout de suite
+    que ce n'est pas encore un incident, mais une tendance a surveiller.
+
+    Le niveau critique passe par tous les canaux (comme une vraie alerte
+    critique) ; le niveau warning se limite a Slack/email, pour ne pas
+    multiplier les sollicitations (SMS/popup bureau) sur des tendances
+    encore lointaines/incertaines."""
+    with _verrou:
+        etat = _etat_serveurs.get(serveur) or {}
+        m = etat.get("metriques") or {"cpu": 0, "memoire": 0, "disque_pct": 0, "nb_processus": 0}
+
+    anomalies_synthetiques = [phrase]
+    envoyer_alerte_slack(m, anomalies_synthetiques, phrase)
+    envoyer_email_alerte(m, anomalies_synthetiques, phrase)
+    if prevision["niveau_cible"] == "critique":
+        envoyer_sms_alerte(m, anomalies_synthetiques, phrase)
+        notifier_bureau_persistant(m, anomalies_synthetiques, phrase, {prevision["type_anomalie"]: phrase})
+
+    socketio.emit("nouvelle_prevision", {"serveur": serveur, "prevision": prevision, "phrase": phrase},
+                  room=f"machine:{serveur}")
+    socketio.emit("nouvelle_prevision", {"serveur": serveur, "prevision": prevision, "phrase": phrase},
+                  room="admins")
+
+
+def boucle_provisionnement():
+    """Toutes les 5 minutes : recalcule les tendances de chaque serveur
+    connu, met a jour/cree les previsions en base, alerte pour les
+    nouvelles, et purge les previsions dont l'echeance est perimee sans
+    incident reel (fausses alertes, pour le suivi de fiabilite)."""
+    while True:
+        try:
+            for s in historique.lister_serveurs():
+                provisionnement.traiter_previsions_serveur(
+                    s["nom"], envoyer_alerte_preventive=_envoyer_alerte_preventive
+                )
+            historique.expirer_previsions_perimees()
+        except Exception as e:
+            print(f"[dashboard] Erreur dans la boucle de provisionnement (ignoree) : {e}")
+        time.sleep(300)
+
 
 def boucle_nettoyage_notifications():
     """Nettoie périodiquement les anomalies actives obsolètes."""
@@ -403,6 +457,38 @@ def api_solutions_connues():
     if serveur and not _machine_est_visible(serveur):
         return jsonify({"erreur": "Non autorise pour cette machine."}), 403
     return jsonify(historique.solutions_deja_vues(type_anomalie, serveur=serveur))
+
+
+@app.route("/api/previsions")
+@login_required
+def api_previsions():
+    """Previsions actives (provisionnement) : tendances en cours qui
+    risquent de franchir un seuil dans les prochaines heures."""
+    serveur_demande = request.args.get("serveur")
+    autorisees = _machines_visibles()
+    if autorisees is not None:
+        if serveur_demande and serveur_demande not in autorisees:
+            return jsonify({"erreur": "Non autorise pour cette machine."}), 403
+        kwargs = {"serveur": serveur_demande} if serveur_demande else {"serveurs": list(autorisees)}
+    else:
+        kwargs = {"serveur": serveur_demande}
+    previsions = historique.previsions_actives(**kwargs)
+    for p in previsions:
+        p["phrase"] = provisionnement.phrase_prevision(p)
+    return jsonify(previsions)
+
+
+@app.route("/api/previsions/fiabilite")
+@login_required
+def api_previsions_fiabilite():
+    """Bilan de fiabilite des previsions (confirmees vs fausses alertes,
+    delai d'anticipation moyen) - transparence sur la valeur reelle de la
+    couche preventive."""
+    serveur = request.args.get("serveur")
+    autorisees = _machines_visibles()
+    if autorisees is not None and serveur and serveur not in autorisees:
+        return jsonify({"erreur": "Non autorise pour cette machine."}), 403
+    return jsonify(historique.statistiques_fiabilite_previsions(serveur=serveur))
 
 
 @app.route("/api/chat", methods=["POST"])
@@ -1558,6 +1644,8 @@ if __name__ == "__main__":
     lancer_planificateur_en_arriere_plan()
     t3 = threading.Thread(target=boucle_nettoyage_notifications, daemon=True)
     t3.start()
+    t4 = threading.Thread(target=boucle_provisionnement, daemon=True)
+    t4.start()
     port = int(os.environ.get("PORT", 8080))
     print(f"Dashboard disponible sur http://localhost:{port}")
     print(f"Cle API pour les agents distants : {CLE_API}")

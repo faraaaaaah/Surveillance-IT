@@ -152,6 +152,30 @@ def initialiser_db():
                 derniere_maj TEXT
             )
         """)
+        # Voir section "Provisionnement" plus bas : une prevision = "a ce
+        # rythme, ce seuil sera franchi dans environ X". On la garde en
+        # base (et pas juste en memoire) pour pouvoir la confronter au
+        # reel ensuite (confirmee / fausse alerte) et calculer un taux de
+        # fiabilite dans le temps.
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS previsions (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                serveur TEXT NOT NULL,
+                type_anomalie TEXT NOT NULL,
+                niveau_cible TEXT NOT NULL,
+                valeur_actuelle REAL,
+                pente_par_heure REAL,
+                confiance REAL,
+                seuil_cible REAL,
+                cree_le TEXT NOT NULL,
+                derniere_maj TEXT NOT NULL,
+                echeance_estimee TEXT NOT NULL,
+                statut TEXT NOT NULL DEFAULT 'active',
+                incident_id INTEGER,
+                resolu_le TEXT
+            )
+        """)
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_previsions_serveur_statut ON previsions (serveur, statut)")
         _migrer_schema_si_besoin(conn)
         conn.commit()
 
@@ -296,6 +320,14 @@ INFOS_ANOMALIES = {
         "solution": "Consultez les métriques détaillées pour identifier la cause.",
     },
 }
+
+
+def type_anomalie_de(texte_anomalie: str) -> str:
+    """Version publique de _type_et_niveau, ne renvoyant que le type
+    (cpu/memoire/disque/...). Utilisee par dashboard.py pour relier une
+    anomalie qui vient de survenir a une eventuelle prevision active
+    (voir confirmer_previsions_pour_anomalies)."""
+    return _type_et_niveau(texte_anomalie)[0]
 
 
 def infos_type(type_anomalie: str) -> dict:
@@ -704,6 +736,199 @@ def calculer_score_sante(serveur: str = "local", m_actuel: dict = None, fenetre_
         "nb_incidents_ouverts": nb_ouverts,
     }
 
+
+
+# ---------------------------------------------------------------------------
+# Provisionnement — alerter AVANT que l'anomalie ne se produise
+# ---------------------------------------------------------------------------
+# Une "prevision" (voir provisionnement.py pour le calcul de tendance) dit :
+# "sur ce serveur, cette metrique va franchir tel seuil dans environ X".
+# On la garde en base pour 3 raisons :
+#   1) Ne pas re-alerter a chaque cycle pour la MEME tendance en cours
+#      (dedup : une prevision 'active' par serveur+type+niveau_cible).
+#   2) La confronter au reel : si un vrai incident du meme type s'ouvre
+#      avant l'echeance -> prevision "confirmee" (l'alerte etait fondee).
+#      Si l'echeance passe sans incident -> "fausse_alerte". Si la
+#      tendance retombe avant l'echeance -> "annulee" (bon signe : le
+#      probleme s'est resorbe tout seul, pas une erreur de prevision).
+#   3) Donner un taux de fiabilite dans le temps (transparence envers les
+#      employes : on ne veut pas d'alertes "au cas ou" qui ne se
+#      verifient jamais et finissent ignorees).
+
+def initialiser_table_previsions():
+    initialiser_db()  # la table est creee dans initialiser_db(), voir plus haut
+
+
+def enregistrer_ou_maj_prevision(serveur: str, type_anomalie: str, niveau_cible: str,
+                                  valeur_actuelle: float, pente_par_heure: float, confiance: float,
+                                  seuil_cible: float, echeance_estimee: str):
+    """Cree une nouvelle prevision 'active', ou met a jour celle deja en
+    cours pour ce serveur+type+niveau_cible (meme tendance qui se
+    poursuit : on actualise l'echeance au lieu d'empiler des doublons).
+    Retourne (id, est_nouvelle)."""
+    initialiser_table_previsions()
+    maintenant_str = maintenant_local().strftime("%Y-%m-%d %H:%M:%S")
+
+    existante = _execute_with_lock(
+        """SELECT id FROM previsions
+           WHERE serveur = ? AND type_anomalie = ? AND niveau_cible = ? AND statut = 'active'""",
+        (serveur, type_anomalie, niveau_cible), fetch=True
+    )
+    if existante:
+        _id = existante[0]["id"]
+        _execute_with_lock(
+            """UPDATE previsions SET valeur_actuelle = ?, pente_par_heure = ?, confiance = ?,
+               seuil_cible = ?, echeance_estimee = ?, derniere_maj = ? WHERE id = ?""",
+            (valeur_actuelle, pente_par_heure, confiance, seuil_cible, echeance_estimee, maintenant_str, _id)
+        )
+        return _id, False
+
+    rows = _execute_with_lock(
+        """INSERT INTO previsions
+           (serveur, type_anomalie, niveau_cible, valeur_actuelle, pente_par_heure, confiance,
+            seuil_cible, cree_le, derniere_maj, echeance_estimee, statut)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'active')""",
+        (serveur, type_anomalie, niveau_cible, valeur_actuelle, pente_par_heure, confiance,
+         seuil_cible, maintenant_str, maintenant_str, echeance_estimee)
+    )
+    # SQLite : recuperer l'id insere sans un second aller-retour concurrent.
+    nouvel_id = _execute_with_lock(
+        """SELECT id FROM previsions WHERE serveur = ? AND type_anomalie = ? AND niveau_cible = ?
+           AND statut = 'active' ORDER BY id DESC LIMIT 1""",
+        (serveur, type_anomalie, niveau_cible), fetch=True
+    )[0]["id"]
+    return nouvel_id, True
+
+
+def previsions_actives(serveur: str = None, serveurs: list = None) -> list:
+    """Previsions en cours ('active'), les plus urgentes (echeance la plus
+    proche) en premier. `serveur`/`serveurs` : mêmes conventions que
+    lister_incidents (restriction par compte)."""
+    initialiser_table_previsions()
+    if serveurs is not None and not serveurs:
+        return []
+    conditions, params = ["statut = 'active'"], []
+    if serveurs:
+        placeholders = ",".join("?" for _ in serveurs)
+        conditions.append(f"serveur IN ({placeholders})")
+        params.extend(serveurs)
+    elif serveur:
+        conditions.append("serveur = ?")
+        params.append(serveur)
+    where = "WHERE " + " AND ".join(conditions)
+    rows = _execute_with_lock(
+        f"SELECT * FROM previsions {where} ORDER BY echeance_estimee ASC",
+        tuple(params), fetch=True
+    )
+    return [dict(r) for r in rows] if rows else []
+
+
+def annuler_previsions_hors_tendance(serveur: str, types_toujours_actifs: set):
+    """Annule les previsions 'active' d'un serveur dont le type n'est plus
+    en tendance haussiere preoccupante (la metrique s'est stabilisee ou a
+    redescendu avant l'echeance). Statut distinct de 'fausse_alerte' : la
+    prevision n'etait pas erronee, la situation s'est juste amelioree."""
+    initialiser_table_previsions()
+    maintenant_str = maintenant_local().strftime("%Y-%m-%d %H:%M:%S")
+    actives = _execute_with_lock(
+        "SELECT id, type_anomalie FROM previsions WHERE serveur = ? AND statut = 'active'",
+        (serveur,), fetch=True
+    )
+    for p in (actives or []):
+        if p["type_anomalie"] not in types_toujours_actifs:
+            _execute_with_lock(
+                "UPDATE previsions SET statut = 'annulee', resolu_le = ? WHERE id = ?",
+                (maintenant_str, p["id"])
+            )
+
+
+def confirmer_previsions_pour_anomalies(serveur: str, types_anomalies: set):
+    """A appeler juste apres l'enregistrement d'un nouvel incident (voir
+    dashboard.py) : pour chaque type d'anomalie reellement survenu, si une
+    prevision 'active' existait pour ce serveur+type, on la marque
+    'confirmee' et on la relie a l'incident ouvert correspondant — la
+    prevision avait raison, et l'employe peut voir "on vous avait prevenu
+    il y a X, voici ce qui s'est passe"."""
+    initialiser_table_previsions()
+    maintenant_str = maintenant_local().strftime("%Y-%m-%d %H:%M:%S")
+    for type_anomalie in types_anomalies:
+        actives = _execute_with_lock(
+            """SELECT id FROM previsions WHERE serveur = ? AND type_anomalie = ? AND statut = 'active'""",
+            (serveur, type_anomalie), fetch=True
+        )
+        if not actives:
+            continue
+        incident = _execute_with_lock(
+            """SELECT id FROM incidents WHERE serveur = ? AND type_anomalie = ?
+               ORDER BY derniere_occurrence DESC LIMIT 1""",
+            (serveur, type_anomalie), fetch=True
+        )
+        incident_id = incident[0]["id"] if incident else None
+        for p in actives:
+            _execute_with_lock(
+                "UPDATE previsions SET statut = 'confirmee', incident_id = ?, resolu_le = ? WHERE id = ?",
+                (incident_id, maintenant_str, p["id"])
+            )
+
+
+def expirer_previsions_perimees():
+    """A appeler periodiquement : les previsions 'active' dont l'echeance
+    estimee est deja passee SANS qu'un incident reel ne se soit produit
+    deviennent des 'fausse_alerte' — la tendance ne s'est pas confirmee.
+    Sert au calcul du taux de fiabilite."""
+    initialiser_table_previsions()
+    maintenant_str = maintenant_local().strftime("%Y-%m-%d %H:%M:%S")
+    _execute_with_lock(
+        """UPDATE previsions SET statut = 'fausse_alerte', resolu_le = ?
+           WHERE statut = 'active' AND echeance_estimee < ?""",
+        (maintenant_str, maintenant_str)
+    )
+
+
+def statistiques_fiabilite_previsions(serveur: str = None, jours: int = 30) -> dict:
+    """Bilan de fiabilite des previsions sur la periode : combien se sont
+    confirmees (vrai incident survenu) vs fausses alertes (echeance passee
+    sans incident), et le delai moyen d'anticipation obtenu quand la
+    prevision etait juste. Sert de tableau de bord de confiance pour les
+    responsables — un outil qui "crie au loup" sans jamais avoir raison
+    perd sa valeur, autant le mesurer explicitement."""
+    initialiser_table_previsions()
+    depuis = (maintenant_local() - timedelta(days=jours)).strftime("%Y-%m-%d %H:%M:%S")
+    condition, params = "WHERE cree_le >= ?", [depuis]
+    if serveur:
+        condition += " AND serveur = ?"
+        params.append(serveur)
+
+    rows = _execute_with_lock(
+        f"""SELECT statut, cree_le, resolu_le FROM previsions {condition}""",
+        tuple(params), fetch=True
+    )
+    rows = rows or []
+    nb_confirmees = sum(1 for r in rows if r["statut"] == "confirmee")
+    nb_fausses = sum(1 for r in rows if r["statut"] == "fausse_alerte")
+    nb_annulees = sum(1 for r in rows if r["statut"] == "annulee")
+    nb_actives = sum(1 for r in rows if r["statut"] == "active")
+
+    delais = []
+    for r in rows:
+        if r["statut"] == "confirmee" and r["resolu_le"]:
+            try:
+                d = datetime.strptime(r["resolu_le"], "%Y-%m-%d %H:%M:%S") - datetime.strptime(r["cree_le"], "%Y-%m-%d %H:%M:%S")
+                delais.append(d.total_seconds() / 60)
+            except ValueError:
+                pass
+
+    base_jugee = nb_confirmees + nb_fausses  # 'annulee'/'active' pas encore tranchees
+    fiabilite_pct = round(100 * nb_confirmees / base_jugee, 1) if base_jugee else None
+
+    return {
+        "nb_confirmees": nb_confirmees,
+        "nb_fausses_alertes": nb_fausses,
+        "nb_annulees": nb_annulees,
+        "nb_actives": nb_actives,
+        "fiabilite_pct": fiabilite_pct,
+        "delai_moyen_anticipation_min": round(sum(delais) / len(delais), 1) if delais else None,
+    }
 
 
 # ---------------------------------------------------------------------------
