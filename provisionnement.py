@@ -1,16 +1,10 @@
 # -*- coding: utf-8 -*-
 """
-Module Provisionnement — Prédiction avancée avec Machine Learning et OpenShift AI
--------------------------------------------------------------------------------
+Module Provisionnement — Version Production OpenShift
+Avec gestion robuste des permissions et des chemins
+---------------------------------------------------
 SENTINEL provisionne AVANT que l'anomalie ne se produise en utilisant
 un ensemble de modèles ML (XGBoost, LSTM, Prophet) déployés sur OpenShift AI.
-
-Fonctionnalités clés :
-- Prédiction multi-modèles (ensemble learning)
-- Auto-adaptation et réentraînement automatique
-- Déploiement sur OpenShift AI (KServe, S3, Prometheus)
-- Feature importance pour l'interprétabilité
-- Monitoring et alerting intégré
 """
 
 import os
@@ -25,6 +19,7 @@ import threading
 import logging
 from collections import deque
 import time
+import tempfile
 
 # Data processing
 import numpy as np
@@ -85,88 +80,342 @@ import historique
 import monitoring_core
 from auth import TOKENS_CSS, JS_TEMA_ET_MENU, render_topbar
 
-# Configuration du logging
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
-)
-logger = logging.getLogger(__name__)
-
 # ============================================================================
-# CONFIGURATION
+# CONFIGURATION DURABLE POUR OPENSHIFT
 # ============================================================================
 
-class Config:
-    """Configuration centralisée pour le module ML et OpenShift AI"""
+class ProductionConfig:
+    """
+    Configuration robuste pour OpenShift
+    Gère automatiquement les permissions et les chemins
+    """
     
-    # --- Paramètres ML ---
-    WINDOW_SIZE = 60  # Minutes pour les séquences LSTM
-    PREDICTION_HORIZON = 24  # Heures de prédiction
-    RETRAINING_INTERVAL = 24  # Heures entre réentraînements
-    MIN_SAMPLES_FOR_TRAINING = 100
-    SEQUENCE_LOOKBACK = 12  # Minutes pour les features statistiques
-    
-    # Seuils de confiance
-    CONFIDENCE_THRESHOLD = 0.6
-    ANOMALY_PROB_THRESHOLD = 0.6
-    DRIFT_THRESHOLD = 0.1
-    
-    # Paramètres XGBoost
-    XGB_LEARNING_RATE = 0.1
-    XGB_MAX_DEPTH = 6
-    XGB_N_ESTIMATORS = 100
-    
-    # Paramètres LSTM
-    LSTM_HIDDEN_SIZE = 64
-    LSTM_NUM_LAYERS = 2
-    LSTM_EPOCHS = 50
-    LSTM_DROPOUT = 0.2
-    
-    # Métriques suivies
-    METRICS = ['cpu', 'memoire', 'disque_pct']
-    THRESHOLDS = {
-        'cpu': 85,
-        'memoire': 90,
-        'disque_pct': 90
-    }
-    
-    # --- Paramètres OpenShift AI ---
-    # S3 / Object Storage
-    S3_ENDPOINT = os.getenv('S3_ENDPOINT', 's3.openshift-cluster.com')
-    S3_BUCKET = os.getenv('S3_BUCKET', 'sentinel-models')
-    S3_ACCESS_KEY = os.getenv('S3_ACCESS_KEY', 'minioadmin')
-    S3_SECRET_KEY = os.getenv('S3_SECRET_KEY', 'minioadmin')
-    
-    # KServe
-    KSERVE_NAMESPACE = os.getenv('KSERVE_NAMESPACE', 'model-serving')
-    KSERVE_ENDPOINT = os.getenv('KSERVE_ENDPOINT', 'http://kserve.openshift-cluster.com')
-    
-    # Prometheus
-    PROMETHEUS_URL = os.getenv('PROMETHEUS_URL', 'http://prometheus-operated:9090')
-    
-    # Paths
-    MODEL_DIR = Path(os.getenv('MODEL_DIR', '/models'))
-    CACHE_DIR = Path(os.getenv('CACHE_DIR', '/cache/ml'))
-    DATA_DIR = Path(os.getenv('DATA_DIR', '/data'))
-    
-    # Mode de déploiement
-    DEPLOYMENT_MODE = os.getenv('DEPLOYMENT_MODE', 'standalone')  # 'standalone', 'openshift', 'hybrid'
+    # Variables d'environnement
+    ENV_PREFIX = "SURVEILLANCE_"
     
     @classmethod
-    def ensure_directories(cls):
-        """Crée les répertoires nécessaires"""
-        for dir_path in [cls.MODEL_DIR, cls.CACHE_DIR, cls.DATA_DIR]:
-            dir_path.mkdir(parents=True, exist_ok=True)
+    def get_env(cls, name: str, default: Any = None) -> str:
+        """Récupère une variable d'environnement avec préfixe"""
+        return os.getenv(f"{cls.ENV_PREFIX}{name}", os.getenv(name, default))
     
     @classmethod
-    def is_openshift_mode(cls) -> bool:
-        """Vérifie si on est en mode OpenShift"""
-        return cls.DEPLOYMENT_MODE in ['openshift', 'hybrid']
+    def get_path(cls, name: str, default: str) -> Path:
+        """Retourne un chemin valide avec vérification des permissions"""
+        path_str = cls.get_env(name, default)
+        path = Path(path_str)
+        
+        # Vérifier si on peut créer le répertoire
+        try:
+            path.mkdir(parents=True, exist_ok=True)
+            # Tester l'écriture
+            test_file = path / ".write_test"
+            test_file.touch()
+            test_file.unlink()
+            print(f"✅ Répertoire accessible: {path}")
+            return path
+        except (PermissionError, OSError) as e:
+            # Fallback sur /tmp
+            fallback_path = Path("/tmp") / path.name
+            fallback_path.mkdir(parents=True, exist_ok=True)
+            print(f"⚠️ Permission refusée sur {path}, utilisation de {fallback_path}")
+            return fallback_path
     
     @classmethod
-    def is_standalone_mode(cls) -> bool:
-        """Vérifie si on est en mode standalone"""
-        return cls.DEPLOYMENT_MODE == 'standalone'
+    def initialize(cls):
+        """Initialise la configuration"""
+        
+        # === PATHS ===
+        cls.BASE_DIR = cls.get_path("BASE_DIR", "/data")
+        cls.MODEL_DIR = cls.get_path("MODEL_DIR", str(cls.BASE_DIR / "models"))
+        cls.CACHE_DIR = cls.get_path("CACHE_DIR", str(cls.BASE_DIR / "cache"))
+        cls.DATA_DIR = cls.get_path("DATA_DIR", str(cls.BASE_DIR / "input"))
+        cls.LOG_DIR = cls.get_path("LOG_DIR", str(cls.BASE_DIR / "logs"))
+        cls.TEMP_DIR = cls.get_path("TEMP_DIR", "/tmp/surveillance")
+        
+        # === MODE ===
+        cls.OPENSHIFT_MODE = cls.get_env("OPENSHIFT_MODE", "false").lower() == "true"
+        cls.DEPLOYMENT_MODE = cls.get_env("DEPLOYMENT_MODE", "standalone")
+        
+        # === S3 ===
+        cls.S3_ENDPOINT = cls.get_env("S3_ENDPOINT")
+        cls.S3_BUCKET = cls.get_env("S3_BUCKET", "surveillance-models")
+        cls.S3_ACCESS_KEY = cls.get_env("S3_ACCESS_KEY")
+        cls.S3_SECRET_KEY = cls.get_env("S3_SECRET_KEY")
+        
+        # === KServe ===
+        cls.KSERVE_ENDPOINT = cls.get_env("KSERVE_ENDPOINT", "http://kserve.model-serving.svc.cluster.local")
+        cls.KSERVE_NAMESPACE = cls.get_env("KSERVE_NAMESPACE", "model-serving")
+        
+        # === LOGGING ===
+        log_level = cls.get_env("LOG_LEVEL", "INFO")
+        cls.LOG_LEVEL = getattr(logging, log_level.upper(), logging.INFO)
+        
+        # === PERFORMANCE ===
+        cls.WINDOW_SIZE = int(cls.get_env("WINDOW_SIZE", "60"))
+        cls.PREDICTION_HORIZON = int(cls.get_env("PREDICTION_HORIZON", "24"))
+        cls.RETRAINING_INTERVAL = int(cls.get_env("RETRAINING_INTERVAL", "24"))
+        cls.MIN_SAMPLES_FOR_TRAINING = int(cls.get_env("MIN_SAMPLES", "100"))
+        
+        # === MÉTRIQUES ===
+        cls.METRICS = cls.get_env("METRICS", "cpu,memoire,disque_pct").split(",")
+        cls.THRESHOLDS = {
+            'cpu': float(cls.get_env("CPU_THRESHOLD", "85")),
+            'memoire': float(cls.get_env("MEMORY_THRESHOLD", "90")),
+            'disque_pct': float(cls.get_env("DISK_THRESHOLD", "90"))
+        }
+        
+        # === CONFIDENCE ===
+        cls.CONFIDENCE_THRESHOLD = float(cls.get_env("CONFIDENCE_THRESHOLD", "0.6"))
+        cls.ANOMALY_PROB_THRESHOLD = float(cls.get_env("ANOMALY_PROB_THRESHOLD", "0.6"))
+        
+        # === XGBoost ===
+        cls.XGB_LEARNING_RATE = float(cls.get_env("XGB_LEARNING_RATE", "0.1"))
+        cls.XGB_MAX_DEPTH = int(cls.get_env("XGB_MAX_DEPTH", "6"))
+        cls.XGB_N_ESTIMATORS = int(cls.get_env("XGB_N_ESTIMATORS", "100"))
+        
+        # === LSTM ===
+        cls.LSTM_HIDDEN_SIZE = int(cls.get_env("LSTM_HIDDEN_SIZE", "64"))
+        cls.LSTM_NUM_LAYERS = int(cls.get_env("LSTM_NUM_LAYERS", "2"))
+        cls.LSTM_EPOCHS = int(cls.get_env("LSTM_EPOCHS", "50"))
+        cls.LSTM_DROPOUT = float(cls.get_env("LSTM_DROPOUT", "0.2"))
+        
+        # Journaliser la configuration
+        cls._log_config()
+        
+        return cls
+    
+    @classmethod
+    def _log_config(cls):
+        """Log la configuration"""
+        print("=" * 60)
+        print("🔧 CONFIGURATION SURVEILLANCE")
+        print("=" * 60)
+        print(f"Mode: {cls.DEPLOYMENT_MODE}")
+        print(f"OpenShift: {cls.OPENSHIFT_MODE}")
+        print(f"MODEL_DIR: {cls.MODEL_DIR}")
+        print(f"CACHE_DIR: {cls.CACHE_DIR}")
+        print(f"DATA_DIR: {cls.DATA_DIR}")
+        print(f"LOG_DIR: {cls.LOG_DIR}")
+        print(f"Metrics: {cls.METRICS}")
+        print(f"Thresholds: {cls.THRESHOLDS}")
+        if cls.S3_ENDPOINT:
+            print(f"S3: {cls.S3_ENDPOINT}")
+        if cls.KSERVE_ENDPOINT:
+            print(f"KServe: {cls.KSERVE_ENDPOINT}")
+        print("=" * 60)
+
+# ============================================================================
+# LOGGING DURABLE
+# ============================================================================
+
+class ProductionLogger:
+    """Logger configuré pour la production"""
+    
+    _instance = None
+    
+    def __new__(cls):
+        if cls._instance is None:
+            cls._instance = super().__new__(cls)
+            cls._instance._init_logger()
+        return cls._instance
+    
+    def _init_logger(self):
+        """Initialise le logger"""
+        self.logger = logging.getLogger('surveillance')
+        self.logger.setLevel(Config.LOG_LEVEL)
+        
+        # Supprimer les handlers existants
+        self.logger.handlers.clear()
+        
+        # Format
+        formatter = logging.Formatter(
+            '%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+            datefmt='%Y-%m-%d %H:%M:%S'
+        )
+        
+        # Handler console
+        console = logging.StreamHandler()
+        console.setFormatter(formatter)
+        self.logger.addHandler(console)
+        
+        # Handler fichier
+        log_file = Config.LOG_DIR / 'surveillance.log'
+        try:
+            file_handler = logging.FileHandler(log_file)
+            file_handler.setFormatter(formatter)
+            self.logger.addHandler(file_handler)
+            print(f"📝 Logs dans: {log_file}")
+        except Exception as e:
+            print(f"⚠️ Impossible d'écrire les logs: {e}")
+    
+    def get(self):
+        return self.logger
+
+# ============================================================================
+# STOCKAGE DURABLE
+# ============================================================================
+
+class DurableStorage:
+    """Stockage avec fallback et gestion d'erreurs"""
+    
+    def __init__(self):
+        self.base_dir = Config.MODEL_DIR
+        self.logger = ProductionLogger().get()
+        self._init_storage()
+    
+    def _init_storage(self):
+        """Initialise le stockage"""
+        # S3
+        self.s3 = None
+        if Config.OPENSHIFT_MODE and Config.S3_ENDPOINT and S3_AVAILABLE:
+            try:
+                self.s3 = boto3.client(
+                    's3',
+                    endpoint_url=Config.S3_ENDPOINT,
+                    aws_access_key_id=Config.S3_ACCESS_KEY,
+                    aws_secret_access_key=Config.S3_SECRET_KEY
+                )
+                self.logger.info("✅ S3 initialisé")
+            except Exception as e:
+                self.logger.warning(f"⚠️ S3 indisponible: {e}")
+        
+        # Local
+        self.local_dir = Config.MODEL_DIR
+        self.local_dir.mkdir(parents=True, exist_ok=True)
+        self.logger.info(f"📁 Stockage local: {self.local_dir}")
+        
+        # Cache
+        self.cache = {}
+    
+    def save(self, data: Any, name: str, format: str = 'pkl') -> Dict[str, str]:
+        """Sauvegarde avec fallback"""
+        results = {'local': str(self.local_dir / f"{name}.{format}")}
+        
+        # Sauvegarde locale
+        local_path = self.local_dir / f"{name}.{format}"
+        try:
+            if format == 'pkl':
+                with open(local_path, 'wb') as f:
+                    pickle.dump(data, f)
+            elif format == 'json':
+                with open(local_path, 'w') as f:
+                    json.dump(data, f)
+            self.logger.info(f"✅ Sauvegarde locale: {local_path}")
+        except Exception as e:
+            self.logger.error(f"❌ Erreur sauvegarde locale: {e}")
+            # Fallback /tmp
+            fallback_path = Path('/tmp') / f"{name}.{format}"
+            try:
+                if format == 'pkl':
+                    with open(fallback_path, 'wb') as f:
+                        pickle.dump(data, f)
+                elif format == 'json':
+                    with open(fallback_path, 'w') as f:
+                        json.dump(data, f)
+                results['fallback'] = str(fallback_path)
+                self.logger.info(f"✅ Sauvegarde fallback: {fallback_path}")
+            except Exception as e2:
+                self.logger.error(f"❌ Erreur sauvegarde fallback: {e2}")
+        
+        # Sauvegarde S3
+        if self.s3:
+            try:
+                key = f"models/{name}.{format}"
+                self.s3.put_object(
+                    Bucket=Config.S3_BUCKET,
+                    Key=key,
+                    Body=pickle.dumps(data),
+                    Metadata={
+                        'created_at': datetime.now().isoformat(),
+                        'name': name,
+                        'format': format
+                    }
+                )
+                results['s3'] = f"s3://{Config.S3_BUCKET}/{key}"
+                self.logger.info(f"✅ Sauvegarde S3: {results['s3']}")
+            except Exception as e:
+                self.logger.warning(f"⚠️ Sauvegarde S3 échouée: {e}")
+        
+        return results
+    
+    def load(self, name: str, format: str = 'pkl') -> Optional[Any]:
+        """Charge avec fallback"""
+        # Essayer S3 d'abord
+        if self.s3:
+            try:
+                key = f"models/{name}.{format}"
+                response = self.s3.get_object(Bucket=Config.S3_BUCKET, Key=key)
+                data = pickle.loads(response['Body'].read())
+                self.logger.info(f"✅ Chargé depuis S3: {name}")
+                return data
+            except Exception as e:
+                self.logger.debug(f"S3 non disponible: {e}")
+        
+        # Essayer local
+        local_path = self.local_dir / f"{name}.{format}"
+        if local_path.exists():
+            try:
+                with open(local_path, 'rb') as f:
+                    data = pickle.load(f)
+                self.logger.info(f"✅ Chargé depuis local: {local_path}")
+                return data
+            except Exception as e:
+                self.logger.error(f"❌ Erreur chargement local: {e}")
+        
+        # Essayer fallback /tmp
+        fallback_path = Path('/tmp') / f"{name}.{format}"
+        if fallback_path.exists():
+            try:
+                with open(fallback_path, 'rb') as f:
+                    data = pickle.load(f)
+                self.logger.info(f"✅ Chargé depuis fallback: {fallback_path}")
+                return data
+            except Exception as e:
+                self.logger.error(f"❌ Erreur chargement fallback: {e}")
+        
+        return None
+    
+    def exists(self, name: str, format: str = 'pkl') -> bool:
+        """Vérifie si un modèle existe"""
+        # Vérifier local
+        if (self.local_dir / f"{name}.{format}").exists():
+            return True
+        # Vérifier fallback
+        if (Path('/tmp') / f"{name}.{format}").exists():
+            return True
+        # Vérifier S3
+        if self.s3:
+            try:
+                key = f"models/{name}.{format}"
+                self.s3.head_object(Bucket=Config.S3_BUCKET, Key=key)
+                return True
+            except:
+                pass
+        return False
+    
+    def list_models(self) -> List[str]:
+        """Liste les modèles disponibles"""
+        models = []
+        
+        # Local
+        for f in self.local_dir.glob("*.pkl"):
+            models.append(f.stem)
+        
+        # S3
+        if self.s3:
+            try:
+                response = self.s3.list_objects_v2(
+                    Bucket=Config.S3_BUCKET,
+                    Prefix="models/"
+                )
+                for obj in response.get('Contents', []):
+                    name = obj['Key'].split('/')[-1].replace('.pkl', '')
+                    if name and name not in models:
+                        models.append(name)
+            except:
+                pass
+        
+        return list(set(models))
 
 # ============================================================================
 # MODÈLES ML
@@ -211,7 +460,6 @@ class ProphetWrapper:
     def train(self, df: pd.DataFrame, metric: str):
         """Entraîne le modèle Prophet"""
         if not PROPHET_AVAILABLE:
-            logger.warning("Prophet non disponible, utilisation d'un modèle alternatif")
             return
         
         self.metric = metric
@@ -247,31 +495,10 @@ class ProphetWrapper:
         future = self.model.make_future_dataframe(periods=periods, freq=freq)
         forecast = self.model.predict(future)
         return forecast
-    
-    def save(self, path: Path):
-        """Sauvegarde le modèle"""
-        if not PROPHET_AVAILABLE:
-            return
-        with open(path, 'wb') as f:
-            pickle.dump({
-                'model': self.model,
-                'metric': self.metric,
-                'last_training': self.last_training
-            }, f)
-    
-    def load(self, path: Path):
-        """Charge le modèle"""
-        if not PROPHET_AVAILABLE:
-            return
-        with open(path, 'rb') as f:
-            data = pickle.load(f)
-            self.model = data['model']
-            self.metric = data['metric']
-            self.last_training = data['last_training']
 
 
 class SimpleProphetAlternative:
-    """Alternative simple à Prophet pour les cas où Prophet n'est pas disponible"""
+    """Alternative simple à Prophet"""
     
     @staticmethod
     def predict_trend(data: List[float], periods: int = 12) -> List[float]:
@@ -282,11 +509,10 @@ class SimpleProphetAlternative:
         x = np.arange(len(data))
         slope, intercept = np.polyfit(x, data, 1)
         
-        # Ajouter une petite saisonnalité
         predictions = []
         for i in range(periods):
             base = slope * (len(data) + i) + intercept
-            seasonal = np.sin(2 * np.pi * i / 24) * 5  # Saisonnalité journalière
+            seasonal = np.sin(2 * np.pi * i / 24) * 5
             predictions.append(max(0, base + seasonal))
         
         return predictions
@@ -299,7 +525,12 @@ class ProvisionnementML:
     """Système de provisionnement utilisant le Machine Learning"""
     
     def __init__(self):
-        Config.ensure_directories()
+        # Configuration
+        self.config = Config
+        
+        # Stockage
+        self.storage = DurableStorage()
+        self.logger = ProductionLogger().get()
         
         # Modèles
         self.scaler = StandardScaler()
@@ -309,17 +540,17 @@ class ProvisionnementML:
             n_estimators=100
         )
         self.xgb_classifier = XGBClassifier(
-            n_estimators=Config.XGB_N_ESTIMATORS,
-            max_depth=Config.XGB_MAX_DEPTH,
-            learning_rate=Config.XGB_LEARNING_RATE,
+            n_estimators=self.config.XGB_N_ESTIMATORS,
+            max_depth=self.config.XGB_MAX_DEPTH,
+            learning_rate=self.config.XGB_LEARNING_RATE,
             random_state=42,
             use_label_encoder=False,
             eval_metric='logloss'
         )
         self.xgb_regressor = XGBRegressor(
-            n_estimators=Config.XGB_N_ESTIMATORS,
-            max_depth=Config.XGB_MAX_DEPTH,
-            learning_rate=Config.XGB_LEARNING_RATE,
+            n_estimators=self.config.XGB_N_ESTIMATORS,
+            max_depth=self.config.XGB_MAX_DEPTH,
+            learning_rate=self.config.XGB_LEARNING_RATE,
             random_state=42
         )
         self.lstm_model = None
@@ -332,30 +563,55 @@ class ProvisionnementML:
         self.performance_metrics = {}
         
         # Cache
-        self.data_cache = {}
         self.prediction_cache = {}
         self.model_cache = {}
         
         # Thread lock
         self.training_lock = threading.Lock()
         
-        # Logger
-        self.logger = logging.getLogger(__name__)
-        
         # Initialisation
-        self._init_storage()
+        self._load_or_init_models()
     
-    def _init_storage(self):
-        """Initialise les composants de stockage"""
-        if Config.is_openshift_mode() and S3_AVAILABLE:
-            self.s3_client = boto3.client(
-                's3',
-                endpoint_url=Config.S3_ENDPOINT,
-                aws_access_key_id=Config.S3_ACCESS_KEY,
-                aws_secret_access_key=Config.S3_SECRET_KEY
-            )
-        else:
-            self.s3_client = None
+    def _load_or_init_models(self):
+        """Charge les modèles existants ou initialise de nouveaux"""
+        self.logger.info("Chargement des modèles...")
+        
+        # Charger les modèles
+        self.scaler = self.storage.load('scaler') or StandardScaler()
+        self.xgb_classifier = self.storage.load('xgb_classifier') or XGBClassifier()
+        self.xgb_regressor = self.storage.load('xgb_regressor') or XGBRegressor()
+        
+        # Charger LSTM si disponible
+        if self.storage.exists('lstm_model'):
+            try:
+                # Reconstruire l'architecture LSTM
+                self.lstm_model = LSTMPredictor(input_size=1)
+                model_data = self.storage.load('lstm_model')
+                if model_data:
+                    self.lstm_model.load_state_dict(model_data)
+                    self.logger.info("✅ LSTM chargé")
+            except Exception as e:
+                self.logger.warning(f"⚠️ Erreur chargement LSTM: {e}")
+        
+        # Charger Prophet
+        if PROPHET_AVAILABLE:
+            for metric in self.config.METRICS:
+                if self.storage.exists(f'prophet_{metric}'):
+                    try:
+                        prophet_model = ProphetWrapper()
+                        prophet_model.load(self.storage.local_dir / f'prophet_{metric}.pkl')
+                        self.prophet_models[metric] = prophet_model
+                        self.logger.info(f"✅ Prophet {metric} chargé")
+                    except Exception as e:
+                        self.logger.warning(f"⚠️ Erreur chargement Prophet {metric}: {e}")
+        
+        # Métadonnées
+        metadata = self.storage.load('metadata', 'json')
+        if metadata:
+            self.last_training = datetime.fromisoformat(metadata.get('last_training', '')) if metadata.get('last_training') else None
+            self.performance_metrics = metadata.get('performance_metrics', {})
+            self.feature_importance = metadata.get('feature_importance', {})
+            self.logger.info("✅ Métadonnées chargées")
     
     def _prepare_features(self, measures: List[Dict]) -> pd.DataFrame:
         """Prépare les features pour le ML"""
@@ -363,7 +619,7 @@ class ProvisionnementML:
             return pd.DataFrame()
         
         df = pd.DataFrame(measures)
-        required_cols = ['horodatage'] + Config.METRICS
+        required_cols = ['horodatage'] + self.config.METRICS
         if not all(col in df.columns for col in required_cols):
             missing = [col for col in required_cols if col not in df.columns]
             self.logger.warning(f"Colonnes manquantes: {missing}")
@@ -380,15 +636,18 @@ class ProvisionnementML:
         df['is_business_hours'] = ((df['hour'] >= 9) & (df['hour'] <= 18)).astype(int)
         
         # Features statistiques glissantes
-        for col in Config.METRICS:
+        for col in self.config.METRICS:
             for window in [5, 15, 30, 60]:
                 df[f'{col}_rolling_mean_{window}'] = df[col].rolling(window).mean()
                 df[f'{col}_rolling_std_{window}'] = df[col].rolling(window).std()
+                df[f'{col}_rolling_min_{window}'] = df[col].rolling(window).min()
+                df[f'{col}_rolling_max_{window}'] = df[col].rolling(window).max()
         
         # Features de tendance
-        for col in Config.METRICS:
+        for col in self.config.METRICS:
             df[f'{col}_diff_1'] = df[col].diff()
             df[f'{col}_diff_5'] = df[col].diff(5)
+            df[f'{col}_diff_15'] = df[col].diff(15)
             df[f'{col}_pct_change'] = df[col].pct_change()
             
             for window in [5, 15, 30]:
@@ -397,6 +656,7 @@ class ProvisionnementML:
         # Features de relation
         df['cpu_memory_ratio'] = df['cpu'] / (df['memoire'] + 1)
         df['cpu_disk_ratio'] = df['cpu'] / (df['disque_pct'] + 1)
+        df['memory_disk_ratio'] = df['memoire'] / (df['disque_pct'] + 1)
         
         # Features de saisonnalité
         df['hour_sin'] = np.sin(2 * np.pi * df['hour'] / 24)
@@ -408,103 +668,6 @@ class ProvisionnementML:
         df = df.fillna(0)
         
         return df
-    
-    def _train_lstm(self, X_train: np.ndarray, y_train: np.ndarray,
-                   X_val: np.ndarray, y_val: np.ndarray) -> LSTMPredictor:
-        """Entraîne le modèle LSTM"""
-        X_scaled = self.scaler.fit_transform(X_train)
-        X_val_scaled = self.scaler.transform(X_val)
-        
-        # Créer les séquences
-        X_seq, y_seq = [], []
-        for i in range(len(X_scaled) - Config.WINDOW_SIZE):
-            X_seq.append(X_scaled[i:i + Config.WINDOW_SIZE])
-            y_seq.append(y_train[i + Config.WINDOW_SIZE])
-        
-        if len(X_seq) == 0:
-            raise ValueError("Pas assez de données pour créer des séquences")
-        
-        X_seq = np.array(X_seq)
-        y_seq = np.array(y_seq)
-        
-        X_val_seq, y_val_seq = [], []
-        for i in range(len(X_val_scaled) - Config.WINDOW_SIZE):
-            X_val_seq.append(X_val_scaled[i:i + Config.WINDOW_SIZE])
-            y_val_seq.append(y_val[i + Config.WINDOW_SIZE])
-        
-        if len(X_val_seq) == 0:
-            X_val_seq, y_val_seq = X_seq, y_seq
-        
-        X_val_seq = np.array(X_val_seq)
-        y_val_seq = np.array(y_val_seq)
-        
-        dataset = TensorDataset(
-            torch.FloatTensor(X_seq),
-            torch.FloatTensor(y_seq).reshape(-1, 1)
-        )
-        dataloader = DataLoader(dataset, batch_size=32, shuffle=True)
-        
-        input_size = X_seq.shape[2]
-        self.lstm_model = LSTMPredictor(
-            input_size=input_size,
-            hidden_size=Config.LSTM_HIDDEN_SIZE,
-            num_layers=Config.LSTM_NUM_LAYERS,
-            dropout=Config.LSTM_DROPOUT
-        )
-        
-        optimizer = optim.Adam(self.lstm_model.parameters(), lr=0.001)
-        criterion = nn.MSELoss()
-        
-        best_val_loss = float('inf')
-        patience = 10
-        patience_counter = 0
-        
-        self.lstm_model.train()
-        for epoch in range(Config.LSTM_EPOCHS):
-            epoch_loss = 0
-            for X_batch, y_batch in dataloader:
-                optimizer.zero_grad()
-                output = self.lstm_model(X_batch)
-                loss = criterion(output, y_batch)
-                loss.backward()
-                optimizer.step()
-                epoch_loss += loss.item()
-            
-            self.lstm_model.eval()
-            with torch.no_grad():
-                val_output = self.lstm_model(torch.FloatTensor(X_val_seq))
-                val_loss = criterion(val_output, torch.FloatTensor(y_val_seq).reshape(-1, 1))
-            
-            self.lstm_model.train()
-            
-            if val_loss < best_val_loss:
-                best_val_loss = val_loss
-                patience_counter = 0
-                torch.save(self.lstm_model.state_dict(),
-                          Config.MODEL_DIR / 'best_lstm_model.pth')
-            else:
-                patience_counter += 1
-                if patience_counter >= patience:
-                    break
-        
-        self.lstm_model.load_state_dict(torch.load(Config.MODEL_DIR / 'best_lstm_model.pth'))
-        return self.lstm_model
-    
-    def _train_prophet(self, df: pd.DataFrame):
-        """Entraîne les modèles Prophet"""
-        if not PROPHET_AVAILABLE:
-            self.logger.warning("Prophet non disponible, utilisation de l'alternative")
-            return
-        
-        for metric in Config.METRICS:
-            try:
-                prophet_model = ProphetWrapper()
-                prophet_model.train(df, metric)
-                self.prophet_models[metric] = prophet_model
-                prophet_model.save(Config.MODEL_DIR / f'prophet_{metric}.pkl')
-                self.logger.info(f"Modèle Prophet entraîné pour {metric}")
-            except Exception as e:
-                self.logger.error(f"Erreur entraînement Prophet pour {metric}: {e}")
     
     def _train_xgboost(self, X: np.ndarray, y_class: np.ndarray, y_reg: np.ndarray):
         """Entraîne les modèles XGBoost"""
@@ -539,7 +702,7 @@ class ProvisionnementML:
                 'disque_pct_rolling_mean_15',
                 'cpu_diff_1', 'memoire_diff_1', 'disque_pct_diff_1',
                 'cpu_pct_change', 'memoire_pct_change', 'disque_pct_pct_change',
-                'cpu_memory_ratio', 'cpu_disk_ratio',
+                'cpu_memory_ratio', 'cpu_disk_ratio', 'memory_disk_ratio',
                 'hour_sin', 'hour_cos', 'day_sin', 'day_cos'
             ]
             
@@ -558,16 +721,137 @@ class ProvisionnementML:
                 'regression_r2': r2_score(y_reg_val, y_reg_pred)
             })
             
-            # Sauvegarder les modèles
-            self.xgb_classifier.save_model(str(Config.MODEL_DIR / 'xgb_classifier.json'))
-            self.xgb_regressor.save_model(str(Config.MODEL_DIR / 'xgb_regressor.json'))
-            
-            with open(Config.MODEL_DIR / 'scaler.pkl', 'wb') as f:
-                pickle.dump(self.scaler, f)
+            # Sauvegarder
+            self._save_models()
                 
         except Exception as e:
             self.logger.error(f"Erreur entraînement XGBoost: {e}")
             raise
+    
+    def _train_lstm(self, X_train: np.ndarray, y_train: np.ndarray,
+                   X_val: np.ndarray, y_val: np.ndarray):
+        """Entraîne le modèle LSTM"""
+        try:
+            X_scaled = self.scaler.fit_transform(X_train)
+            X_val_scaled = self.scaler.transform(X_val)
+            
+            # Créer les séquences
+            X_seq, y_seq = [], []
+            for i in range(len(X_scaled) - self.config.WINDOW_SIZE):
+                X_seq.append(X_scaled[i:i + self.config.WINDOW_SIZE])
+                y_seq.append(y_train[i + self.config.WINDOW_SIZE])
+            
+            if len(X_seq) == 0:
+                self.logger.warning("Pas assez de données pour LSTM")
+                return
+            
+            X_seq = np.array(X_seq)
+            y_seq = np.array(y_seq)
+            
+            X_val_seq, y_val_seq = [], []
+            for i in range(len(X_val_scaled) - self.config.WINDOW_SIZE):
+                X_val_seq.append(X_val_scaled[i:i + self.config.WINDOW_SIZE])
+                y_val_seq.append(y_val[i + self.config.WINDOW_SIZE])
+            
+            if len(X_val_seq) == 0:
+                X_val_seq, y_val_seq = X_seq, y_seq
+            
+            X_val_seq = np.array(X_val_seq)
+            y_val_seq = np.array(y_val_seq)
+            
+            dataset = TensorDataset(
+                torch.FloatTensor(X_seq),
+                torch.FloatTensor(y_seq).reshape(-1, 1)
+            )
+            dataloader = DataLoader(dataset, batch_size=32, shuffle=True)
+            
+            input_size = X_seq.shape[2]
+            self.lstm_model = LSTMPredictor(
+                input_size=input_size,
+                hidden_size=self.config.LSTM_HIDDEN_SIZE,
+                num_layers=self.config.LSTM_NUM_LAYERS,
+                dropout=self.config.LSTM_DROPOUT
+            )
+            
+            optimizer = optim.Adam(self.lstm_model.parameters(), lr=0.001)
+            criterion = nn.MSELoss()
+            
+            best_val_loss = float('inf')
+            patience = 10
+            patience_counter = 0
+            
+            self.lstm_model.train()
+            for epoch in range(self.config.LSTM_EPOCHS):
+                epoch_loss = 0
+                for X_batch, y_batch in dataloader:
+                    optimizer.zero_grad()
+                    output = self.lstm_model(X_batch)
+                    loss = criterion(output, y_batch)
+                    loss.backward()
+                    optimizer.step()
+                    epoch_loss += loss.item()
+                
+                self.lstm_model.eval()
+                with torch.no_grad():
+                    val_output = self.lstm_model(torch.FloatTensor(X_val_seq))
+                    val_loss = criterion(val_output, torch.FloatTensor(y_val_seq).reshape(-1, 1))
+                
+                self.lstm_model.train()
+                
+                if val_loss < best_val_loss:
+                    best_val_loss = val_loss
+                    patience_counter = 0
+                    # Sauvegarder
+                    self.storage.save(self.lstm_model.state_dict(), 'lstm_model')
+                else:
+                    patience_counter += 1
+                    if patience_counter >= patience:
+                        break
+            
+            # Charger le meilleur modèle
+            model_data = self.storage.load('lstm_model')
+            if model_data:
+                self.lstm_model.load_state_dict(model_data)
+                self.logger.info("✅ LSTM entraîné et sauvegardé")
+                
+        except Exception as e:
+            self.logger.error(f"Erreur entraînement LSTM: {e}")
+    
+    def _train_prophet(self, df: pd.DataFrame):
+        """Entraîne les modèles Prophet"""
+        if not PROPHET_AVAILABLE:
+            self.logger.warning("Prophet non disponible")
+            return
+        
+        for metric in self.config.METRICS:
+            try:
+                prophet_model = ProphetWrapper()
+                prophet_model.train(df, metric)
+                self.prophet_models[metric] = prophet_model
+                prophet_model.save(self.storage.local_dir / f'prophet_{metric}.pkl')
+                self.logger.info(f"✅ Prophet entraîné pour {metric}")
+            except Exception as e:
+                self.logger.error(f"Erreur entraînement Prophet {metric}: {e}")
+    
+    def _save_models(self):
+        """Sauvegarde tous les modèles"""
+        try:
+            # Sauvegarder les modèles
+            self.storage.save(self.scaler, 'scaler')
+            self.storage.save(self.xgb_classifier, 'xgb_classifier')
+            self.storage.save(self.xgb_regressor, 'xgb_regressor')
+            
+            # Métadonnées
+            metadata = {
+                'last_training': self.last_training.isoformat() if self.last_training else None,
+                'performance_metrics': self.performance_metrics,
+                'feature_importance': self.feature_importance
+            }
+            self.storage.save(metadata, 'metadata', 'json')
+            
+            self.logger.info("✅ Modèles sauvegardés")
+        except Exception as e:
+            self.logger.error(f"Erreur sauvegarde modèles: {e}")
     
     def train_models(self, server: str, historical_data: List[Dict]) -> Dict:
         """Entraîne tous les modèles ML"""
@@ -578,16 +862,16 @@ class ProvisionnementML:
             self.training_in_progress = True
             
             try:
-                self.logger.info(f"Début entraînement ML pour {server}")
+                self.logger.info(f"📊 Début entraînement ML pour {server}")
                 
                 df = self._prepare_features(historical_data)
                 if df.empty:
                     return {'status': 'error', 'message': 'Données insuffisantes'}
                 
-                if len(df) < Config.MIN_SAMPLES_FOR_TRAINING:
+                if len(df) < self.config.MIN_SAMPLES_FOR_TRAINING:
                     return {
                         'status': 'error',
-                        'message': f'Pas assez de données: {len(df)}/{Config.MIN_SAMPLES_FOR_TRAINING}'
+                        'message': f'Pas assez de données: {len(df)}/{self.config.MIN_SAMPLES_FOR_TRAINING}'
                     }
                 
                 # Préparer les labels
@@ -595,13 +879,13 @@ class ProvisionnementML:
                 y_class = np.zeros(len(df))
                 y_reg = np.zeros(len(df))
                 
-                lookahead = Config.PREDICTION_HORIZON // 6
+                lookahead = self.config.PREDICTION_HORIZON // 6
                 for i in range(len(df) - lookahead):
                     for j in range(lookahead):
-                        for metric in Config.METRICS:
+                        for metric in self.config.METRICS:
                             if i + j < len(df):
                                 value = df.iloc[i + j][metric]
-                                threshold = Config.THRESHOLDS[metric]
+                                threshold = self.config.THRESHOLDS[metric]
                                 if value >= threshold:
                                     y_class[i] = 1
                                     y_reg[i] = max(1, j + 1)
@@ -613,7 +897,7 @@ class ProvisionnementML:
                 self._train_xgboost(X, y_class, y_reg)
                 
                 # LSTM
-                if len(X) > Config.WINDOW_SIZE * 2:
+                if len(X) > self.config.WINDOW_SIZE * 2:
                     X_train, X_val, y_train, y_val = train_test_split(
                         X, y_class, test_size=0.2, random_state=42
                     )
@@ -623,18 +907,9 @@ class ProvisionnementML:
                 self._train_prophet(df)
                 
                 self.last_training = datetime.now()
+                self._save_models()
                 
-                metadata = {
-                    'last_training': self.last_training.isoformat(),
-                    'performance_metrics': self.performance_metrics,
-                    'feature_importance': self.feature_importance,
-                    'n_samples': len(df),
-                    'server': server
-                }
-                with open(Config.MODEL_DIR / 'metadata.json', 'w') as f:
-                    json.dump(metadata, f, indent=2)
-                
-                self.logger.info(f"Entraînement terminé pour {server}")
+                self.logger.info(f"✅ Entraînement terminé pour {server}")
                 
                 return {
                     'status': 'success',
@@ -644,62 +919,25 @@ class ProvisionnementML:
                 }
                 
             except Exception as e:
-                self.logger.error(f"Erreur entraînement: {e}")
+                self.logger.error(f"❌ Erreur entraînement: {e}")
                 return {'status': 'error', 'message': str(e)}
             finally:
                 self.training_in_progress = False
-    
-    def load_models(self, server: str) -> bool:
-        """Charge les modèles sauvegardés"""
-        try:
-            model_dir = Config.MODEL_DIR
-            
-            if (model_dir / 'xgb_classifier.json').exists():
-                self.xgb_classifier.load_model(str(model_dir / 'xgb_classifier.json'))
-                self.xgb_regressor.load_model(str(model_dir / 'xgb_regressor.json'))
-            
-            if (model_dir / 'scaler.pkl').exists():
-                with open(model_dir / 'scaler.pkl', 'rb') as f:
-                    self.scaler = pickle.load(f)
-            
-            if PROPHET_AVAILABLE:
-                for metric in Config.METRICS:
-                    prophet_path = model_dir / f'prophet_{metric}.pkl'
-                    if prophet_path.exists():
-                        prophet_model = ProphetWrapper()
-                        prophet_model.load(prophet_path)
-                        self.prophet_models[metric] = prophet_model
-            
-            if (model_dir / 'best_lstm_model.pth').exists():
-                self.lstm_model = LSTMPredictor(input_size=1)
-                self.lstm_model.load_state_dict(torch.load(model_dir / 'best_lstm_model.pth'))
-            
-            if (model_dir / 'metadata.json').exists():
-                with open(model_dir / 'metadata.json', 'r') as f:
-                    metadata = json.load(f)
-                    self.last_training = datetime.fromisoformat(metadata['last_training'])
-                    self.performance_metrics = metadata.get('performance_metrics', {})
-                    self.feature_importance = metadata.get('feature_importance', {})
-            
-            return True
-            
-        except Exception as e:
-            self.logger.error(f"Erreur chargement modèles: {e}")
-            return False
     
     def predict_anomaly(self, server: str, recent_measures: List[Dict]) -> Dict:
         """Prédit les anomalies futures"""
         try:
             if self.last_training is None:
-                if not self.load_models(server):
-                    return {'error': 'Modèles non entraînés'}
+                self.logger.warning("Modèles non entraînés, chargement...")
+                self._load_or_init_models()
             
             if self.last_training:
                 hours_since_training = (datetime.now() - self.last_training).total_seconds() / 3600
-                if hours_since_training > Config.RETRAINING_INTERVAL:
+                if hours_since_training > self.config.RETRAINING_INTERVAL:
+                    self.logger.info(f"Réentraînement automatique pour {server}")
                     threading.Thread(
-                        target=self._auto_retrain,
-                        args=(server,)
+                        target=self.train_models,
+                        args=(server, historique.recuperer_mesures(server, heures=168))
                     ).start()
             
             df = self._prepare_features(recent_measures)
@@ -715,9 +953,9 @@ class ProvisionnementML:
             
             # LSTM
             lstm_prediction = None
-            if self.lstm_model and len(X) >= Config.WINDOW_SIZE:
-                sequence = X[-Config.WINDOW_SIZE:]
-                sequence = sequence.reshape(1, Config.WINDOW_SIZE, -1)
+            if self.lstm_model and len(X) >= self.config.WINDOW_SIZE:
+                sequence = X[-self.config.WINDOW_SIZE:]
+                sequence = sequence.reshape(1, self.config.WINDOW_SIZE, -1)
                 tensor_sequence = torch.FloatTensor(sequence)
                 
                 self.lstm_model.eval()
@@ -733,7 +971,6 @@ class ProvisionnementML:
                         if not forecast.empty:
                             prophet_predictions[metric] = float(forecast['yhat'].iloc[-1])
                     else:
-                        # Alternative simple
                         values = df[metric].values[-30:] if len(df) >= 30 else df[metric].values
                         predictions = SimpleProphetAlternative.predict_trend(
                             list(values), periods=12
@@ -748,7 +985,7 @@ class ProvisionnementML:
                 xgb_prob=anomaly_prob,
                 lstm_pred=lstm_prediction,
                 prophet_preds=prophet_predictions,
-                current_values=df[Config.METRICS].iloc[-1].to_dict()
+                current_values=df[self.config.METRICS].iloc[-1].to_dict()
             )
             
             result = {
@@ -757,7 +994,7 @@ class ProvisionnementML:
                 'confiance': round(consensus['confidence'], 2),
                 'temps_estime_avant_anomalie': round(time_to_anomaly, 1),
                 'metrics_predites': prophet_predictions,
-                'valeurs_actuelles': df[Config.METRICS].iloc[-1].to_dict(),
+                'valeurs_actuelles': df[self.config.METRICS].iloc[-1].to_dict(),
                 'feature_importance': dict(list(self.feature_importance.items())[:10]),
                 'ensemble_details': {
                     'xgb_probability': round(anomaly_prob, 3),
@@ -770,7 +1007,7 @@ class ProvisionnementML:
             return result
             
         except Exception as e:
-            self.logger.error(f"Erreur prédiction: {e}")
+            self.logger.error(f"❌ Erreur prédiction: {e}")
             return {'error': str(e)}
     
     def _ensemble_prediction(self, xgb_prob: float, lstm_pred: Optional[float],
@@ -785,7 +1022,7 @@ class ProvisionnementML:
         # LSTM
         lstm_risk = 0.5
         if lstm_pred is not None:
-            lstm_risk = min(1.0, lstm_pred / max(Config.THRESHOLDS.values()))
+            lstm_risk = min(1.0, lstm_pred / max(self.config.THRESHOLDS.values()))
         weighted_prob += weights['lstm'] * lstm_risk
         
         # Prophet
@@ -816,7 +1053,7 @@ class ProvisionnementML:
         n_metrics = len(prophet_preds)
         
         for metric, pred_value in prophet_preds.items():
-            threshold = Config.THRESHOLDS.get(metric, 100)
+            threshold = self.config.THRESHOLDS.get(metric, 100)
             current = current_values.get(metric, 0)
             
             if current >= threshold * 0.8:
@@ -834,7 +1071,7 @@ class ProvisionnementML:
         n_metrics = len(current_values)
         
         for metric, value in current_values.items():
-            threshold = Config.THRESHOLDS.get(metric, 100)
+            threshold = self.config.THRESHOLDS.get(metric, 100)
             ratio = value / threshold
             if ratio >= 0.9:
                 risk_score += 0.9
@@ -871,239 +1108,82 @@ class ProvisionnementML:
         
         return min(1.0, confidence)
     
-    def _auto_retrain(self, server: str):
-        """Entraînement automatique en arrière-plan"""
-        try:
-            self.logger.info(f"Début réentraînement auto pour {server}")
-            historical_data = historique.recuperer_mesures(server, heures=168)
-            if historical_data:
-                self.train_models(server, historical_data)
-        except Exception as e:
-            self.logger.error(f"Erreur réentraînement auto: {e}")
-    
-    def get_model_status(self, server: str) -> Dict:
-        """Retourne le statut des modèles"""
+    def health_check(self) -> Dict:
+        """Vérifie l'état du système"""
         return {
-            'trained': self.last_training is not None,
-            'last_training': self.last_training.isoformat() if self.last_training else None,
-            'performance': self.performance_metrics,
-            'feature_importance': dict(list(self.feature_importance.items())[:5]),
-            'models_loaded': {
-                'xgb_classifier': hasattr(self.xgb_classifier, '_Booster'),
-                'xgb_regressor': hasattr(self.xgb_regressor, '_Booster'),
+            'status': 'healthy',
+            'mode': self.config.DEPLOYMENT_MODE,
+            'openshift': self.config.OPENSHIFT_MODE,
+            'storage': {
+                'local': str(self.config.MODEL_DIR),
+                's3': self.config.S3_ENDPOINT is not None
+            },
+            'models': {
+                'scaler': self.scaler is not None,
+                'xgb_classifier': self.xgb_classifier is not None,
+                'xgb_regressor': self.xgb_regressor is not None,
                 'lstm': self.lstm_model is not None,
                 'prophet': len(self.prophet_models) > 0
             },
-            'training_in_progress': self.training_in_progress
+            'last_training': self.last_training.isoformat() if self.last_training else None,
+            'performance': self.performance_metrics
         }
 
-
-class ProvisionnementOpenShift:
-    """Intégration OpenShift AI pour le provisionnement"""
-    
-    def __init__(self):
-        self.ml_systems = {}
-        self.s3_storage = None
-        self.kserve_client = None
-        self.prometheus_client = None
-        
-        self._init_openshift_components()
-    
-    def _init_openshift_components(self):
-        """Initialise les composants OpenShift"""
-        if Config.is_openshift_mode():
-            if S3_AVAILABLE:
-                self.s3_storage = boto3.client(
-                    's3',
-                    endpoint_url=Config.S3_ENDPOINT,
-                    aws_access_key_id=Config.S3_ACCESS_KEY,
-                    aws_secret_access_key=Config.S3_SECRET_KEY
-                )
-            
-            if KUBERNETES_AVAILABLE:
-                try:
-                    config.load_incluster_config()
-                    self.kserve_client = client.CustomObjectsApi()
-                except:
-                    self.logger.warning("Impossible de charger la configuration Kubernetes")
-            
-            self.logger.info("Composants OpenShift AI initialisés")
-    
-    def _get_ml_system(self, server: str) -> ProvisionnementML:
-        """Récupère ou crée un système ML"""
-        if server not in self.ml_systems:
-            system = ProvisionnementML()
-            system.load_models(server)
-            self.ml_systems[server] = system
-        return self.ml_systems[server]
-    
-    def generer_previsions_ml(self, serveur: str) -> List[Dict]:
-        """Génère des prévisions avec ML"""
-        try:
-            recent_measures = historique.recuperer_mesures(serveur, heures=2)
-            if len(recent_measures) < 10:
-                return []
-            
-            ml_system = self._get_ml_system(serveur)
-            prediction = ml_system.predict_anomaly(serveur, recent_measures)
-            
-            if 'error' in prediction:
-                self.logger.error(f"Erreur prédiction {serveur}: {prediction['error']}")
-                return []
-            
-            if prediction.get('probabilite_anomalie', 0) < 30:
-                return []
-            
-            prevision = {
-                'serveur': serveur,
-                'type_anomalie': 'multi',
-                'niveau_cible': 'critique' if prediction['niveau_risque'] == 'CRITIQUE' else 'warning',
-                'valeur_actuelle': max(prediction['valeurs_actuelles'].values()),
-                'confiance': prediction['confiance'],
-                'probabilite': prediction['probabilite_anomalie'],
-                'temps_estime': prediction['temps_estime_avant_anomalie'],
-                'feature_importance': prediction['feature_importance'],
-                'ml_confidence': 'haute' if prediction['confiance'] > 0.7 else 'moyenne',
-                'metrics': prediction['valeurs_actuelles'],
-                'metrics_predites': prediction['metrics_predites'],
-                'ensemble_details': prediction.get('ensemble_details', {}),
-                'performance_metrics': prediction.get('performance_metrics', {})
-            }
-            
-            return [prevision]
-            
-        except Exception as e:
-            self.logger.error(f"Erreur génération prévisions: {e}")
-            return []
-    
-    def deploy_to_kserve(self, server: str) -> Dict:
-        """Déploie le modèle sur KServe"""
-        if not self.kserve_client:
-            return {'status': 'error', 'message': 'KServe non disponible'}
-        
-        try:
-            model_name = f"provisionnement-{server}"
-            model_path = f"s3://{Config.S3_BUCKET}/models/{model_name}/latest/"
-            
-            inference_service = {
-                "apiVersion": "serving.kserve.io/v1beta1",
-                "kind": "InferenceService",
-                "metadata": {
-                    "name": model_name,
-                    "namespace": Config.KSERVE_NAMESPACE,
-                    "annotations": {
-                        "prometheus.io/scrape": "true",
-                        "prometheus.io/port": "8080"
-                    }
-                },
-                "spec": {
-                    "predictor": {
-                        "minReplicas": 1,
-                        "maxReplicas": 3,
-                        "scaleMetric": "concurrency",
-                        "model": {
-                            "modelFormat": {"name": "xgboost"},
-                            "storageUri": model_path,
-                            "resources": {
-                                "requests": {"cpu": "500m", "memory": "1Gi"},
-                                "limits": {"cpu": "2", "memory": "4Gi"}
-                            }
-                        }
-                    }
-                }
-            }
-            
-            self.kserve_client.create_namespaced_custom_object(
-                group="serving.kserve.io",
-                version="v1beta1",
-                namespace=Config.KSERVE_NAMESPACE,
-                plural="inferenceservices",
-                body=inference_service
-            )
-            
-            return {
-                'status': 'deployed',
-                'endpoint': f"http://{model_name}.{Config.KSERVE_NAMESPACE}.svc.cluster.local",
-                'model_name': model_name
-            }
-            
-        except Exception as e:
-            self.logger.error(f"Erreur déploiement KServe: {e}")
-            return {'status': 'error', 'message': str(e)}
-    
-    def predict_via_kserve(self, server: str, features: Dict) -> Dict:
-        """Fait une prédiction via KServe"""
-        if not REQUESTS_AVAILABLE:
-            return {'error': 'requests non disponible'}
-        
-        try:
-            model_name = f"provisionnement-{server}"
-            endpoint = f"http://{model_name}.{Config.KSERVE_NAMESPACE}.svc.cluster.local/v1/models/{model_name}:predict"
-            
-            response = requests.post(
-                endpoint,
-                json={'instances': [features]},
-                headers={'Content-Type': 'application/json'},
-                timeout=10
-            )
-            
-            if response.status_code == 200:
-                return response.json()
-            else:
-                return {'error': f"HTTP {response.status_code}", 'message': response.text}
-                
-        except Exception as e:
-            self.logger.error(f"Erreur prédiction KServe: {e}")
-            return {'error': str(e)}
-    
-    def get_openshift_models(self) -> List[Dict]:
-        """Liste les modèles déployés sur OpenShift"""
-        models = []
-        
-        if self.kserve_client:
-            try:
-                services = self.kserve_client.list_namespaced_custom_object(
-                    group="serving.kserve.io",
-                    version="v1beta1",
-                    namespace=Config.KSERVE_NAMESPACE,
-                    plural="inferenceservices"
-                )
-                
-                for item in services.get('items', []):
-                    name = item['metadata']['name']
-                    status = item.get('status', {})
-                    models.append({
-                        'name': name,
-                        'status': status.get('conditions', [{}])[-1].get('type', 'Unknown'),
-                        'replicas': status.get('readyReplicas', 0),
-                        'endpoint': f"http://{name}.{Config.KSERVE_NAMESPACE}.svc.cluster.local",
-                        'created': item['metadata'].get('creationTimestamp')
-                    })
-            except Exception as e:
-                self.logger.error(f"Erreur listage KServe: {e}")
-        
-        return models
-
-
 # ============================================================================
-# INSTANCE GLOBALE ET FONCTIONS DE COMPATIBILITÉ
+# INTÉGRATION AVEC LE SYSTÈME EXISTANT
 # ============================================================================
 
+# Instance globale
 _integrator = None
+_storage = None
 
-def get_integrator() -> ProvisionnementOpenShift:
+def get_integrator():
     """Récupère l'instance globale"""
     global _integrator
     if _integrator is None:
-        _integrator = ProvisionnementOpenShift()
+        _integrator = ProvisionnementML()
     return _integrator
 
+def get_storage():
+    """Récupère l'instance de stockage"""
+    global _storage
+    if _storage is None:
+        _storage = DurableStorage()
+    return _storage
 
 def generer_previsions(serveur: str) -> List[Dict]:
     """Fonction de compatibilité"""
     integrator = get_integrator()
-    return integrator.generer_previsions_ml(serveur)
-
+    recent_measures = historique.recuperer_mesures(serveur, heures=2)
+    
+    if len(recent_measures) < 10:
+        return []
+    
+    prediction = integrator.predict_anomaly(serveur, recent_measures)
+    
+    if 'error' in prediction:
+        return []
+    
+    if prediction.get('probabilite_anomalie', 0) < 30:
+        return []
+    
+    prevision = {
+        'serveur': serveur,
+        'type_anomalie': 'multi',
+        'niveau_cible': 'critique' if prediction['niveau_risque'] == 'CRITIQUE' else 'warning',
+        'valeur_actuelle': max(prediction['valeurs_actuelles'].values()),
+        'confiance': prediction['confiance'],
+        'probabilite': prediction['probabilite_anomalie'],
+        'temps_estime': prediction['temps_estime_avant_anomalie'],
+        'feature_importance': prediction['feature_importance'],
+        'ml_confidence': 'haute' if prediction['confiance'] > 0.7 else 'moyenne',
+        'metrics': prediction['valeurs_actuelles'],
+        'metrics_predites': prediction['metrics_predites'],
+        'ensemble_details': prediction.get('ensemble_details', {}),
+        'performance_metrics': prediction.get('performance_metrics', {})
+    }
+    
+    return [prevision]
 
 def calculer_tendance(serveur: str, type_anomalie: str, fenetre_minutes: int = 30) -> Optional[Dict]:
     """Fonction de compatibilité"""
@@ -1136,7 +1216,6 @@ def calculer_tendance(serveur: str, type_anomalie: str, fenetre_minutes: int = 3
     except Exception as e:
         logger.error(f"Erreur calcul tendance: {e}")
         return None
-
 
 def traiter_previsions_serveur(serveur: str, envoyer_alerte_preventive=None) -> List[Dict]:
     """Fonction de compatibilité"""
@@ -1180,7 +1259,6 @@ def traiter_previsions_serveur(serveur: str, envoyer_alerte_preventive=None) -> 
     
     return resultats
 
-
 def phrase_prevision_ml(p: Dict) -> str:
     """Génère un message pour une prévision ML"""
     proba = p.get('probabilite', 0)
@@ -1208,7 +1286,6 @@ def phrase_prevision_ml(p: Dict) -> str:
             msg += f"Facteurs clés: {features_str}."
     
     return msg
-
 
 # ============================================================================
 # PAGE WEB
@@ -1522,7 +1599,6 @@ _PAGE = """
 </body></html>
 """
 
-
 @provisionnement_bp.route("/provisionnement")
 @login_required
 def page_provisionnement():
@@ -1535,7 +1611,7 @@ def page_provisionnement():
             _PAGE,
             previsions=[],
             stats={},
-            openshift_mode=Config.is_openshift_mode(),
+            openshift_mode=Config.OPENSHIFT_MODE,
             topbar=render_topbar("provisionnement")
         )
     
@@ -1550,14 +1626,13 @@ def page_provisionnement():
     }
     
     for serveur in autorisees:
-        previsions = integrator.generer_previsions_ml(serveur)
+        previsions = generer_previsions(serveur)
         if previsions:
             for p in previsions:
                 p['phrase'] = phrase_prevision_ml(p)
             all_previsions.extend(previsions)
         
-        ml_system = integrator._get_ml_system(serveur)
-        status = ml_system.get_model_status(serveur)
+        status = integrator.health_check()
         if status.get('performance'):
             stats['performance'] = status['performance']
         if status.get('feature_importance'):
@@ -1571,23 +1646,16 @@ def page_provisionnement():
         _PAGE,
         previsions=all_previsions,
         stats=stats,
-        openshift_mode=Config.is_openshift_mode(),
+        openshift_mode=Config.OPENSHIFT_MODE,
         topbar=render_topbar("provisionnement")
     )
-
 
 @provisionnement_bp.route("/provisionnement/api/status")
 @login_required
 def api_status():
     """API pour le statut des modèles"""
-    serveur = request.args.get('serveur')
-    if not serveur:
-        return jsonify({'error': 'Serveur requis'}), 400
-    
     integrator = get_integrator()
-    ml_system = integrator._get_ml_system(serveur)
-    return jsonify(ml_system.get_model_status(serveur))
-
+    return jsonify(integrator.health_check())
 
 @provisionnement_bp.route("/provisionnement/api/train")
 @login_required
@@ -1602,37 +1670,34 @@ def api_train():
         return jsonify({'error': 'Pas assez de données historiques'}), 400
     
     integrator = get_integrator()
-    ml_system = integrator._get_ml_system(serveur)
-    result = ml_system.train_models(serveur, historical_data)
-    
+    result = integrator.train_models(serveur, historical_data)
     return jsonify(result)
 
-
-@provisionnement_bp.route("/provisionnement/api/deploy-openshift")
-@login_required
-def api_deploy_openshift():
-    """API pour déployer sur OpenShift AI"""
-    serveur = request.args.get('serveur')
-    if not serveur:
-        return jsonify({'error': 'Serveur requis'}), 400
-    
-    if not Config.is_openshift_mode():
-        return jsonify({'error': 'Mode OpenShift non activé'}), 400
-    
+@provisionnement_bp.route("/provisionnement/api/health")
+def api_health():
+    """API de santé"""
     integrator = get_integrator()
-    result = integrator.deploy_to_kserve(serveur)
-    
-    return jsonify(result)
-
+    return jsonify(integrator.health_check())
 
 # ============================================================================
 # INITIALISATION
 # ============================================================================
 
-Config.ensure_directories()
-logger.info("Module Provisionnement ML initialisé")
-logger.info(f"Mode: {Config.DEPLOYMENT_MODE}")
-logger.info(f"OpenShift AI: {'activé' if Config.is_openshift_mode() else 'désactivé'}")
+# Initialiser la configuration
+Config = ProductionConfig.initialize()
+
+# Initialiser le logger
+Logger = ProductionLogger().get()
+
+# Initialiser les modèles
+provisionnement = ProvisionnementML()
+
+Logger.info("🚀 Module Provisionnement ML initialisé")
+Logger.info(f"📁 MODE: {Config.DEPLOYMENT_MODE}")
+Logger.info(f"☁️ OpenShift: {Config.OPENSHIFT_MODE}")
+Logger.info(f"📂 MODEL_DIR: {Config.MODEL_DIR}")
+Logger.info(f"📊 Métriques: {Config.METRICS}")
+Logger.info(f"🎯 Seuils: {Config.THRESHOLDS}")
 
 # ============================================================================
 # EXPORTS
@@ -1644,7 +1709,9 @@ __all__ = [
     'calculer_tendance',
     'traiter_previsions_serveur',
     'get_integrator',
+    'get_storage',
+    'Config',
+    'Logger',
     'ProvisionnementML',
-    'ProvisionnementOpenShift',
-    'Config'
+    'DurableStorage'
 ]
