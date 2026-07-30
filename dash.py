@@ -1307,7 +1307,7 @@ function afficherPlusIncidents(){
 }
 
 async function resoudreIncident(id){
-  const solution = prompt("Incident resolu \nQu'est-ce qui a regle le probleme ? (facultatif, mais utile pour la prochaine fois)");
+  const solution = prompt("Incident resolu \\nQu'est-ce qui a regle le probleme ? (facultatif, mais utile pour la prochaine fois)");
   await fetch(`/api/incidents/${id}/resoudre`, {
     method:'POST',
     headers:{'Content-Type':'application/json'},
