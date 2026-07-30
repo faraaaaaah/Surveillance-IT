@@ -41,6 +41,7 @@ import groupes
 from groupes import groupes_bp
 import audit
 from audit import audit_bp
+from base_connaissances import base_connaissances_bp
 from flask_socketio import join_room, emit as socketio_emit_local
 
 app = Flask(__name__)
@@ -56,6 +57,7 @@ app.register_blueprint(parametres_bp)
 app.register_blueprint(assignations_bp)
 app.register_blueprint(groupes_bp)
 app.register_blueprint(audit_bp)
+app.register_blueprint(base_connaissances_bp)
 
 
 @app.before_request
@@ -379,12 +381,28 @@ def api_resoudre_incident(incident_id):
     serveur_incident = historique.obtenir_serveur_incident(incident_id)
     if serveur_incident and not _machine_est_visible(serveur_incident):
         return jsonify({"erreur": "Non autorise pour cette machine."}), 403
-    historique.resoudre_incident_manuellement(incident_id)
+    data = request.get_json(force=True, silent=True) or {}
+    historique.resoudre_incident_manuellement(incident_id, solution=data.get("solution"))
     payload = {"id": incident_id}
     if serveur_incident:
         socketio.emit("incident_resolu", payload, room=f"machine:{serveur_incident}")
     socketio.emit("incident_resolu", payload, room="admins")
     return jsonify({"ok": True})
+
+
+@app.route("/api/solutions_connues")
+@login_required
+def api_solutions_connues():
+    """Solutions deja notees par des employes pour ce type d'anomalie —
+    alimente l'encart 'deja rencontre, voici ce qui a marche' cote
+    dashboard et la page Base de connaissances."""
+    type_anomalie = request.args.get("type")
+    if not type_anomalie:
+        return jsonify({"erreur": "parametre 'type' manquant"}), 400
+    serveur = request.args.get("serveur")
+    if serveur and not _machine_est_visible(serveur):
+        return jsonify({"erreur": "Non autorise pour cette machine."}), 403
+    return jsonify(historique.solutions_deja_vues(type_anomalie, serveur=serveur))
 
 
 @app.route("/api/chat", methods=["POST"])
@@ -570,6 +588,31 @@ PAGE_HTML = """
   #chat-form{display:flex; border-top:1px solid var(--border);}
   #chat-input{flex:1; background:transparent; border:none; color:var(--text); padding:10px 12px; font-size:12.5px; outline:none;}
   #chat-form button{background:none; border:none; color:var(--accent); font-weight:700; padding:0 14px; cursor:pointer;}
+
+  /* Menu utilisateur (avatar + nom + menu deroulant) — composant partage
+     avec auth.py / destinataires.py / base_connaissances.py, ouverture au
+     clic ET au survol. */
+  .menu-user{position:relative;}
+  .menu-user-btn{display:flex; align-items:center; gap:8px; background:transparent; border:1px solid var(--border);
+                 border-radius:20px; padding:5px 12px 5px 5px; cursor:pointer; color:var(--text); font-size:13px;}
+  .menu-user-btn:hover{border-color:var(--muted);}
+  .menu-user .avatar{width:26px; height:26px; border-radius:50%; background:var(--accent); color:#08131f;
+                      display:flex; align-items:center; justify-content:center; font-weight:700; font-size:12px; flex-shrink:0;}
+  .menu-user .chevron{color:var(--muted); font-size:10px; transition:transform .15s;}
+  .menu-user.ouvert .chevron{transform:rotate(180deg);}
+  .menu-user-dropdown{display:none; position:absolute; top:calc(100% + 8px); right:0; min-width:220px;
+                       background:var(--panel); border:1px solid var(--border); border-radius:10px;
+                       box-shadow:0 10px 30px rgba(0,0,0,.3); z-index:200; overflow:hidden;}
+  .menu-user.ouvert .menu-user-dropdown{display:block;}
+  .menu-user-info{padding:12px 14px; border-bottom:1px solid var(--border);}
+  .menu-user-info .nom{font-weight:600; font-size:13.5px;}
+  .menu-user-info .role{display:inline-block; margin-top:4px; font-size:10.5px; padding:2px 8px; border-radius:10px;
+                          background:rgba(88,166,255,.15); color:var(--accent); text-transform:uppercase; letter-spacing:.04em;}
+  .menu-user-dropdown a, .menu-user-dropdown .item{display:flex; align-items:center; gap:9px; padding:10px 14px;
+                          font-size:13px; color:var(--text); cursor:pointer; text-decoration:none;}
+  .menu-user-dropdown a:hover, .menu-user-dropdown .item:hover{background:var(--panel2);}
+  .menu-user-dropdown .item.danger{color:var(--crit);}
+  .menu-user-dropdown .separateur{height:1px; background:var(--border); margin:4px 0;}
 </style>
 </head>
 <body>
@@ -1264,7 +1307,12 @@ function afficherPlusIncidents(){
 }
 
 async function resoudreIncident(id){
-  await fetch(`/api/incidents/${id}/resoudre`, {method:'POST'});
+  const solution = prompt("Incident resolu ✅\nQu'est-ce qui a regle le probleme ? (facultatif, mais utile pour la prochaine fois)");
+  await fetch(`/api/incidents/${id}/resoudre`, {
+    method:'POST',
+    headers:{'Content-Type':'application/json'},
+    body: JSON.stringify({solution: solution || ''})
+  });
   incidentsAcquittes.delete(id);
   chargerIncidents();
 }
@@ -1478,6 +1526,23 @@ document.getElementById('chat-form').addEventListener('submit', async (ev) => {
   }
   messages.scrollTop = messages.scrollHeight;
 });
+
+// --- Menu utilisateur deroulant (clic OU survol, meme composant que sur
+// les pages d'administration) ---
+(function(){
+  let delaiFermeture = null;
+  document.addEventListener('DOMContentLoaded', () => {
+    const menu = document.getElementById('menu-utilisateur');
+    if(!menu) return;
+    const bouton = menu.querySelector('.menu-user-btn');
+    const ouvrir = () => { clearTimeout(delaiFermeture); menu.classList.add('ouvert'); };
+    const fermer = () => { delaiFermeture = setTimeout(() => menu.classList.remove('ouvert'), 220); };
+    bouton.addEventListener('click', (e) => { e.stopPropagation(); menu.classList.toggle('ouvert'); });
+    menu.addEventListener('mouseenter', ouvrir);
+    menu.addEventListener('mouseleave', fermer);
+    document.addEventListener('click', (e) => { if(!menu.contains(e.target)) menu.classList.remove('ouvert'); });
+  });
+})();
 </script>
 
 </body>

@@ -110,6 +110,8 @@ def _migrer_schema_si_besoin(conn):
         colonnes_incidents = _colonnes_existantes(conn, "incidents")
         if "stabilise_depuis" not in colonnes_incidents:
             conn.execute("ALTER TABLE incidents ADD COLUMN stabilise_depuis TEXT")
+        if "solution" not in colonnes_incidents:
+            conn.execute("ALTER TABLE incidents ADD COLUMN solution TEXT")
 
 
 def initialiser_db():
@@ -127,7 +129,8 @@ def initialiser_db():
                 statut TEXT NOT NULL DEFAULT 'ouvert',
                 nb_occurrences INTEGER NOT NULL DEFAULT 1,
                 derniere_explication TEXT,
-                stabilise_depuis TEXT
+                stabilise_depuis TEXT,
+                solution TEXT
             )
         """)
         conn.execute("""
@@ -448,13 +451,25 @@ def resoudre_incidents_expires(minutes_inactivite: int = 10):
     )
 
 
-def resoudre_incident_manuellement(incident_id: int):
+def resoudre_incident_manuellement(incident_id: int, solution: str = None):
+    """Cloture un incident. Si `solution` est fourni (texte libre saisi par
+    l'employe qui a traite le probleme : ce qu'il a fait pour le resoudre),
+    il est conserve pour alimenter la base de connaissances — la prochaine
+    fois qu'une anomalie du meme type survient, cette solution pourra etre
+    proposee automatiquement."""
     initialiser_db()
     maintenant_str = maintenant_local().strftime("%Y-%m-%d %H:%M:%S")
-    _execute_with_lock(
-        """UPDATE incidents SET statut = 'resolu', fin = ? WHERE id = ?""",
-        (maintenant_str, incident_id)
-    )
+    solution = (solution or "").strip() or None
+    if solution:
+        _execute_with_lock(
+            """UPDATE incidents SET statut = 'resolu', fin = ?, solution = ? WHERE id = ?""",
+            (maintenant_str, solution, incident_id)
+        )
+    else:
+        _execute_with_lock(
+            """UPDATE incidents SET statut = 'resolu', fin = ? WHERE id = ?""",
+            (maintenant_str, incident_id)
+        )
 
 
 def obtenir_serveur_incident(incident_id: int) -> str:
@@ -690,7 +705,68 @@ def calculer_score_sante(serveur: str = "local", m_actuel: dict = None, fenetre_
     }
 
 
-def contexte_pour_chatbot(serveur: str = None, jours: int = 7, limite: int = 40) -> str:
+
+# ---------------------------------------------------------------------------
+# Base de connaissances — capitaliser sur les incidents deja resolus
+# ---------------------------------------------------------------------------
+# Idee : quand un employe ferme un incident, il peut noter en quelques mots
+# ce qui a resolu le probleme (`solution`, colonne ajoutee sur `incidents`).
+# La prochaine fois qu'une anomalie du meme type survient, on peut alors
+# lui montrer "deja vu X fois, voici ce qui a marche" au lieu de repartir
+# de zero. Utile aux employes (reagir plus vite), aux responsables
+# (reperer les problemes qui reviennent souvent) et a l'entreprise (le
+# savoir reste meme si la personne qui a resolu le probleme part).
+
+def solutions_deja_vues(type_anomalie: str, serveur: str = None, limite: int = 5) -> list:
+    """Solutions notees par les employes pour de precedents incidents du
+    meme type, les plus recentes d'abord. `serveur` optionnel : si fourni,
+    priorise les solutions vues sur CE serveur (meme materiel/config), tout
+    en incluant aussi celles des autres serveurs a la suite."""
+    initialiser_db()
+    conditions = ["type_anomalie = ?", "solution IS NOT NULL", "solution != ''"]
+    params = [type_anomalie]
+    ordre = "derniere_occurrence DESC"
+    if serveur:
+        ordre = "CASE WHEN serveur = ? THEN 0 ELSE 1 END, derniere_occurrence DESC"
+        params = [serveur] + params
+    where = "WHERE " + " AND ".join(conditions)
+    params.append(limite)
+    rows = _execute_with_lock(
+        f"""SELECT serveur, solution, debut, fin, derniere_occurrence, nb_occurrences
+            FROM incidents {where} ORDER BY {ordre} LIMIT ?""",
+        tuple(params), fetch=True
+    )
+    return [dict(r) for r in rows] if rows else []
+
+
+def statistiques_base_connaissances(serveur: str = None) -> list:
+    """Pour chaque type d'anomalie deja rencontre : nombre total
+    d'incidents, nombre de solutions capitalisees, date du dernier episode.
+    Sert de vue d'ensemble pour la page 'Base de connaissances' (utile aux
+    responsables pour reperer les problemes qui reviennent souvent)."""
+    initialiser_db()
+    condition, params = "", ()
+    if serveur:
+        condition, params = "WHERE serveur = ?", (serveur,)
+    rows = _execute_with_lock(
+        f"""SELECT type_anomalie,
+                   COUNT(*) AS nb_incidents,
+                   SUM(CASE WHEN solution IS NOT NULL AND solution != '' THEN 1 ELSE 0 END) AS nb_solutions,
+                   MAX(derniere_occurrence) AS dernier_episode,
+                   SUM(nb_occurrences) AS total_occurrences
+            FROM incidents {condition}
+            GROUP BY type_anomalie
+            ORDER BY nb_incidents DESC""",
+        params, fetch=True
+    )
+    resultat = []
+    for r in (rows or []):
+        d = dict(r)
+        d["infos"] = infos_type(d["type_anomalie"])
+        resultat.append(d)
+    return resultat
+
+
     """Construit un resume textuel de l'historique recent, a injecter dans
     le prompt du LLM pour repondre a des questions en langage naturel."""
     initialiser_db()
