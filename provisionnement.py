@@ -1183,7 +1183,12 @@ def generer_previsions(serveur: str) -> List[Dict]:
     prediction = integrator.predict_anomaly(serveur, recent_measures)
     
     if 'error' in prediction:
-        return []
+        # ML complet indisponible (historique < MIN_SAMPLES_FOR_TRAINING,
+        # entraînement initial en cours, etc.) : on retombe sur une
+        # estimation par régression linéaire simple plutôt que de ne
+        # rien renvoyer. Moins précis que XGBoost+LSTM+Prophet, mais
+        # utilisable dès 10 mesures récentes au lieu de 100.
+        return generer_previsions_simple(serveur)
     
     if prediction.get('probabilite_anomalie', 0) < 30:
         return []
@@ -1205,6 +1210,57 @@ def generer_previsions(serveur: str) -> List[Dict]:
     }
     
     return [prevision]
+
+
+def generer_previsions_simple(serveur: str) -> List[Dict]:
+    """Prévisions de secours par régression linéaire (calculer_tendance),
+    utilisées tant qu'il n'y a pas assez d'historique pour entraîner
+    l'ensemble ML complet. Actives dès 10 mesures récentes (fenêtre de
+    30 min) au lieu des MIN_SAMPLES_FOR_TRAINING (100 par défaut)
+    nécessaires au ML complet."""
+    previsions = []
+    for metrique in Config.METRICS:
+        seuil = Config.THRESHOLDS.get(metrique)
+        if seuil is None:
+            continue
+
+        tendance = calculer_tendance(serveur, metrique, fenetre_minutes=30)
+        if not tendance:
+            continue
+
+        pente = tendance['pente_par_heure']
+        valeur_actuelle = tendance['valeur_actuelle']
+        confiance = tendance['confiance']
+
+        # Pas de tendance à la hausse exploitable, ou régression trop
+        # bruitée (r2 faible), ou déjà au-dessus du seuil (ce n'est plus
+        # une prévision mais un incident réel) : rien à signaler ici.
+        if pente <= 0 or confiance < 0.3 or valeur_actuelle >= seuil:
+            continue
+
+        heures_avant = (seuil - valeur_actuelle) / pente
+        if heures_avant <= 0 or heures_avant > Config.PREDICTION_HORIZON:
+            continue
+
+        niveau_cible = "critique" if heures_avant <= 4 else "warning"
+
+        previsions.append({
+            'serveur': serveur,
+            'type_anomalie': metrique,
+            'niveau_cible': niveau_cible,
+            'valeur_actuelle': valeur_actuelle,
+            'confiance': confiance,
+            'probabilite': min(95, round(confiance * 100)),
+            'temps_estime': round(heures_avant, 1),
+            'feature_importance': {},
+            'ml_confidence': 'estimation simple (historique insuffisant pour le ML complet)',
+            'metrics': {metrique: valeur_actuelle},
+            'metrics_predites': {},
+            'ensemble_details': {'methode': 'regression_lineaire', 'nb_points': tendance['nb_points']},
+            'performance_metrics': {}
+        })
+
+    return previsions
 
 # provisionnement.py - Extension pour filtrer par groupes
 
