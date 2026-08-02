@@ -930,14 +930,35 @@ class ProvisionnementML:
             if self.last_training is None:
                 self.logger.warning("Modèles non entraînés, chargement...")
                 self._load_or_init_models()
-            
+
+            if self.last_training is None:
+                # Aucun entraînement n'a jamais eu lieu (ni en mémoire, ni sur
+                # le stockage durable) : sans ce bloc, on ne rentre jamais dans
+                # le "if self.last_training:" ci-dessous et l'entraînement
+                # n'est donc JAMAIS déclenché automatiquement.
+                if not self.training_in_progress:
+                    historical_data = historique.recuperer_mesures(server, heures=168)
+                    if len(historical_data) >= self.config.MIN_SAMPLES_FOR_TRAINING:
+                        self.logger.info(f"🚀 Entraînement initial déclenché pour {server}")
+                        threading.Thread(
+                            target=self.train_models,
+                            args=(server, historical_data),
+                            daemon=True
+                        ).start()
+                        return {'error': f"Entraînement initial en cours pour {server}, réessayez dans quelques minutes"}
+                    else:
+                        return {'error': f"Modèles non entraînés et données insuffisantes pour {server} ({len(historical_data)}/{self.config.MIN_SAMPLES_FOR_TRAINING})"}
+                else:
+                    return {'error': f"Entraînement déjà en cours pour {server}"}
+
             if self.last_training:
                 hours_since_training = (datetime.now() - self.last_training).total_seconds() / 3600
                 if hours_since_training > self.config.RETRAINING_INTERVAL:
                     self.logger.info(f"Réentraînement automatique pour {server}")
                     threading.Thread(
                         target=self.train_models,
-                        args=(server, historique.recuperer_mesures(server, heures=168))
+                        args=(server, historique.recuperer_mesures(server, heures=168)),
+                        daemon=True
                     ).start()
             
             df = self._prepare_features(recent_measures)
@@ -1227,7 +1248,7 @@ def calculer_tendance(serveur: str, type_anomalie: str, fenetre_minutes: int = 3
             'ml_available': True
         }
     except Exception as e:
-        logger.error(f"Erreur calcul tendance: {e}")
+        Logger.error(f"Erreur calcul tendance: {e}")
         return None
 
 def traiter_previsions_serveur(serveur: str, envoyer_alerte_preventive=None) -> List[Dict]:
