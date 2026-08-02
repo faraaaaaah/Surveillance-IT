@@ -544,14 +544,15 @@ class ProvisionnementML:
             max_depth=self.config.XGB_MAX_DEPTH,
             learning_rate=self.config.XGB_LEARNING_RATE,
             random_state=42,
-            use_label_encoder=False,
-            eval_metric='logloss'
+            eval_metric='logloss',
+            early_stopping_rounds=20
         )
         self.xgb_regressor = XGBRegressor(
             n_estimators=self.config.XGB_N_ESTIMATORS,
             max_depth=self.config.XGB_MAX_DEPTH,
             learning_rate=self.config.XGB_LEARNING_RATE,
-            random_state=42
+            random_state=42,
+            early_stopping_rounds=20
         )
         self.lstm_model = None
         self.prophet_models = {}
@@ -679,14 +680,12 @@ class ProvisionnementML:
             self.xgb_classifier.fit(
                 X_train, y_class_train,
                 eval_set=[(X_val, y_class_val)],
-                early_stopping_rounds=20,
                 verbose=False
             )
             
             self.xgb_regressor.fit(
                 X_train, y_reg_train,
                 eval_set=[(X_val, y_reg_val)],
-                early_stopping_rounds=20,
                 verbose=False
             )
             
@@ -1630,10 +1629,12 @@ _PAGE = """
       {% if p.ensemble_details %}
       <div class="ensemble-details">
         <table>
+          {% if p.ensemble_details.xgb_probability is defined %}
           <tr>
             <td class="label">XGBoost</td>
             <td>{{ "%.1f"|format(p.ensemble_details.xgb_probability * 100) }}%</td>
           </tr>
+          {% endif %}
           {% if p.ensemble_details.lstm_prediction %}
           <tr>
             <td class="label">LSTM</td>
@@ -1644,6 +1645,12 @@ _PAGE = """
           <tr>
             <td class="label">Prophet</td>
             <td>{{ p.ensemble_details.prophet_predictions|join(', ') }}</td>
+          </tr>
+          {% endif %}
+          {% if p.ensemble_details.methode %}
+          <tr>
+            <td class="label">Méthode</td>
+            <td>{{ p.ensemble_details.methode }} ({{ p.ensemble_details.nb_points }} pts)</td>
           </tr>
           {% endif %}
         </table>
