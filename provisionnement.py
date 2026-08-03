@@ -345,7 +345,8 @@ class DurableStorage:
             try:
                 key = f"models/{name}.{format}"
                 response = self.s3.get_object(Bucket=Config.S3_BUCKET, Key=key)
-                data = pickle.loads(response['Body'].read())
+                raw = response['Body'].read()
+                data = json.loads(raw) if format == 'json' else pickle.loads(raw)
                 self.logger.info(f"✅ Chargé depuis S3: {name}")
                 return data
             except Exception as e:
@@ -355,8 +356,12 @@ class DurableStorage:
         local_path = self.local_dir / f"{name}.{format}"
         if local_path.exists():
             try:
-                with open(local_path, 'rb') as f:
-                    data = pickle.load(f)
+                if format == 'json':
+                    with open(local_path, 'r') as f:
+                        data = json.load(f)
+                else:
+                    with open(local_path, 'rb') as f:
+                        data = pickle.load(f)
                 self.logger.info(f"✅ Chargé depuis local: {local_path}")
                 return data
             except Exception as e:
@@ -366,8 +371,12 @@ class DurableStorage:
         fallback_path = Path('/tmp') / f"{name}.{format}"
         if fallback_path.exists():
             try:
-                with open(fallback_path, 'rb') as f:
-                    data = pickle.load(f)
+                if format == 'json':
+                    with open(fallback_path, 'r') as f:
+                        data = json.load(f)
+                else:
+                    with open(fallback_path, 'rb') as f:
+                        data = pickle.load(f)
                 self.logger.info(f"✅ Chargé depuis fallback: {fallback_path}")
                 return data
             except Exception as e:
@@ -428,6 +437,7 @@ class LSTMPredictor(nn.Module):
                  num_layers: int = 2, output_size: int = 1,
                  dropout: float = 0.2):
         super().__init__()
+        self.input_size = input_size
         self.hidden_size = hidden_size
         self.num_layers = num_layers
         
@@ -582,17 +592,36 @@ class ProvisionnementML:
         self.xgb_classifier = self.storage.load('xgb_classifier') or XGBClassifier()
         self.xgb_regressor = self.storage.load('xgb_regressor') or XGBRegressor()
         
+        # Métadonnées (chargées avant le LSTM : on a besoin de
+        # lstm_input_size pour reconstruire la bonne architecture avant
+        # d'appliquer load_state_dict, sinon mismatch garanti si le nombre
+        # de features a été autre chose que 1 à l'entraînement)
+        metadata = self.storage.load('metadata', 'json')
+        lstm_input_size = None
+        if metadata:
+            self.last_training = datetime.fromisoformat(metadata.get('last_training', '')) if metadata.get('last_training') else None
+            self.performance_metrics = metadata.get('performance_metrics', {})
+            self.feature_importance = metadata.get('feature_importance', {})
+            lstm_input_size = metadata.get('lstm_input_size')
+            self.logger.info("✅ Métadonnées chargées")
+        
         # Charger LSTM si disponible
         if self.storage.exists('lstm_model'):
-            try:
-                # Reconstruire l'architecture LSTM
-                self.lstm_model = LSTMPredictor(input_size=1)
-                model_data = self.storage.load('lstm_model')
-                if model_data:
-                    self.lstm_model.load_state_dict(model_data)
-                    self.logger.info("✅ LSTM chargé")
-            except Exception as e:
-                self.logger.warning(f"⚠️ Erreur chargement LSTM: {e}")
+            if lstm_input_size:
+                try:
+                    # Reconstruire l'architecture LSTM avec la même taille
+                    # d'entrée qu'à l'entraînement (sinon load_state_dict
+                    # échoue avec un size mismatch)
+                    self.lstm_model = LSTMPredictor(input_size=lstm_input_size)
+                    model_data = self.storage.load('lstm_model')
+                    if model_data:
+                        self.lstm_model.load_state_dict(model_data)
+                        self.logger.info("✅ LSTM chargé")
+                except Exception as e:
+                    self.logger.warning(f"⚠️ Erreur chargement LSTM: {e}")
+                    self.lstm_model = None
+            else:
+                self.logger.warning("⚠️ LSTM sauvegardé mais lstm_input_size absent des métadonnées, rechargement ignoré (sera réentraîné)")
         
         # Charger Prophet
         if PROPHET_AVAILABLE:
@@ -605,14 +634,6 @@ class ProvisionnementML:
                         self.logger.info(f"✅ Prophet {metric} chargé")
                     except Exception as e:
                         self.logger.warning(f"⚠️ Erreur chargement Prophet {metric}: {e}")
-        
-        # Métadonnées
-        metadata = self.storage.load('metadata', 'json')
-        if metadata:
-            self.last_training = datetime.fromisoformat(metadata.get('last_training', '')) if metadata.get('last_training') else None
-            self.performance_metrics = metadata.get('performance_metrics', {})
-            self.feature_importance = metadata.get('feature_importance', {})
-            self.logger.info("✅ Métadonnées chargées")
     
     def _prepare_features(self, measures: List[Dict]) -> pd.DataFrame:
         """Prépare les features pour le ML"""
@@ -844,7 +865,8 @@ class ProvisionnementML:
             metadata = {
                 'last_training': self.last_training.isoformat() if self.last_training else None,
                 'performance_metrics': self.performance_metrics,
-                'feature_importance': self.feature_importance
+                'feature_importance': self.feature_importance,
+                'lstm_input_size': self.lstm_model.input_size if self.lstm_model else None
             }
             self.storage.save(metadata, 'metadata', 'json')
             
