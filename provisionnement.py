@@ -538,6 +538,26 @@ class ProphetWrapper:
         forecast = self.model.predict(future)
         return forecast
 
+    def save(self, path):
+        """Sauvegarde le wrapper (modèle Prophet inclus). Cette méthode
+        n'existait pas alors qu'elle était déjà appelée après chaque
+        entraînement, ce qui faisait échouer silencieusement la
+        persistance de Prophet à chaque cycle."""
+        with open(path, 'wb') as f:
+            pickle.dump({
+                'model': self.model,
+                'metric': self.metric,
+                'last_training': self.last_training
+            }, f)
+
+    def load(self, path):
+        """Recharge un wrapper précédemment sauvegardé par save()."""
+        with open(path, 'rb') as f:
+            state = pickle.load(f)
+        self.model = state.get('model')
+        self.metric = state.get('metric')
+        self.last_training = state.get('last_training')
+
 
 class SimpleProphetAlternative:
     """Alternative simple à Prophet"""
