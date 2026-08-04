@@ -287,31 +287,63 @@ class DurableStorage:
         # Cache
         self.cache = {}
     
+    @staticmethod
+    def _json_default(obj):
+        """Filet de sécurité pour json.dump : convertit les types numpy
+        (float32/float64/int64/ndarray...) en types Python natifs, au cas
+        où une future métrique/feature_importance ne serait pas castée en
+        amont. Évite qu'un type non prévu ne corrompe metadata.json."""
+        if isinstance(obj, np.integer):
+            return int(obj)
+        if isinstance(obj, np.floating):
+            return float(obj)
+        if isinstance(obj, np.ndarray):
+            return obj.tolist()
+        raise TypeError(f"Objet de type {type(obj)} non sérialisable en JSON")
+
+    def _ecrire_atomique(self, path: Path, data: Any, format: str):
+        """Écrit dans un fichier temporaire puis renomme (os.replace, atomique
+        sur un même filesystem). Si la sérialisation échoue en cours de
+        route, le fichier temporaire est jeté et le fichier final (path)
+        n'est jamais touché — donc jamais tronqué/corrompu."""
+        path = Path(path)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp_path = path.with_suffix(path.suffix + ".tmp")
+        try:
+            if format == 'pkl':
+                with open(tmp_path, 'wb') as f:
+                    pickle.dump(data, f)
+            elif format == 'json':
+                with open(tmp_path, 'w') as f:
+                    json.dump(data, f, default=self._json_default)
+            else:
+                raise ValueError(f"Format inconnu: {format}")
+            os.replace(tmp_path, path)
+        finally:
+            if tmp_path.exists():
+                try:
+                    tmp_path.unlink()
+                except OSError:
+                    pass
+    
     def save(self, data: Any, name: str, format: str = 'pkl') -> Dict[str, str]:
-        """Sauvegarde avec fallback"""
+        """Sauvegarde avec fallback. Écriture atomique (fichier temporaire
+        + renommage) : si la sérialisation échoue en cours de route (ex:
+        type non JSON-serializable), le fichier final n'est jamais touché
+        et reste dans son dernier état valide au lieu d'être tronqué."""
         results = {'local': str(self.local_dir / f"{name}.{format}")}
         
         # Sauvegarde locale
         local_path = self.local_dir / f"{name}.{format}"
         try:
-            if format == 'pkl':
-                with open(local_path, 'wb') as f:
-                    pickle.dump(data, f)
-            elif format == 'json':
-                with open(local_path, 'w') as f:
-                    json.dump(data, f)
+            self._ecrire_atomique(local_path, data, format)
             self.logger.info(f"✅ Sauvegarde locale: {local_path}")
         except Exception as e:
             self.logger.error(f"❌ Erreur sauvegarde locale: {e}")
             # Fallback /tmp
             fallback_path = Path('/tmp') / f"{name}.{format}"
             try:
-                if format == 'pkl':
-                    with open(fallback_path, 'wb') as f:
-                        pickle.dump(data, f)
-                elif format == 'json':
-                    with open(fallback_path, 'w') as f:
-                        json.dump(data, f)
+                self._ecrire_atomique(fallback_path, data, format)
                 results['fallback'] = str(fallback_path)
                 self.logger.info(f"✅ Sauvegarde fallback: {fallback_path}")
             except Exception as e2:
@@ -726,19 +758,25 @@ class ProvisionnementML:
                 'hour_sin', 'hour_cos', 'day_sin', 'day_cos'
             ]
             
-            self.feature_importance = dict(zip(
-                feature_names[:len(self.xgb_classifier.feature_importances_)],
-                self.xgb_classifier.feature_importances_
-            ))
+            # float(...) : les valeurs de feature_importances_ sont en
+            # numpy.float32, non sérialisable en JSON nativement — sans ce
+            # cast, json.dump plante en cours d'écriture et laisse un
+            # metadata.json tronqué/corrompu sur le disque.
+            self.feature_importance = {
+                name: float(importance) for name, importance in zip(
+                    feature_names[:len(self.xgb_classifier.feature_importances_)],
+                    self.xgb_classifier.feature_importances_
+                )
+            }
             
             # Métriques de performance
             y_class_pred = self.xgb_classifier.predict(X_val)
             y_reg_pred = self.xgb_regressor.predict(X_val)
             
             self.performance_metrics.update({
-                'classification_accuracy': accuracy_score(y_class_val, y_class_pred),
-                'regression_rmse': np.sqrt(mean_squared_error(y_reg_val, y_reg_pred)),
-                'regression_r2': r2_score(y_reg_val, y_reg_pred)
+                'classification_accuracy': float(accuracy_score(y_class_val, y_class_pred)),
+                'regression_rmse': float(np.sqrt(mean_squared_error(y_reg_val, y_reg_pred))),
+                'regression_r2': float(r2_score(y_reg_val, y_reg_pred))
             })
             
             # Sauvegarder
