@@ -23,7 +23,10 @@ from hummingbird.ml import convert
 # --- Config : adapte si besoin ---
 MODEL_PKL_PATH = "/data/models/xgb_classifier.pkl"
 LOCAL_EXPORT_PATH = "/tmp/model.onnx"
-NB_FEATURES = 30  # doit correspondre exactement à feature_names dans provisionnement.py
+# NB_FEATURES n'est plus codé en dur : on le lit directement depuis le
+# modèle chargé, car le .pkl réel en production peut avoir été entraîné
+# avec un nombre de colonnes différent de ce qu'on pensait (ex: une
+# version antérieure du feature engineering).
 
 S3_ENDPOINT = "http://minio.farah-boubaker-dev.svc.cluster.local:9000"
 S3_ACCESS_KEY = "minioadmin"
@@ -40,6 +43,10 @@ with open(MODEL_PKL_PATH, "rb") as f:
     xgb_classifier = pickle.load(f)
 
 print(f"✅ Modèle chargé depuis {MODEL_PKL_PATH}")
+
+# Nombre réel de features attendu par CE modèle précis (pas une supposition)
+NB_FEATURES = xgb_classifier.get_booster().num_features()
+print(f"ℹ️  Le modèle attend {NB_FEATURES} features en entrée")
 
 # --- 2. Convertir via Hummingbird (arbre -> tenseurs) ---
 dummy_input = np.zeros((1, NB_FEATURES), dtype=np.float32)
@@ -73,6 +80,6 @@ s3.upload_file(LOCAL_EXPORT_PATH, S3_BUCKET, S3_KEY)
 print(f"✅ Uploadé vers s3://{S3_BUCKET}/{S3_KEY} (écrase l'ancienne version incompatible)")
 print()
 print("Rappel technique (vérifié empiriquement) :")
-print("  - Tenseur d'entrée : 'input', shape FIXE [1, 30], type FP32")
+print(f"  - Tenseur d'entrée : 'input', shape FIXE [1, {NB_FEATURES}], type FP32")
 print("  - Sorties : 'label' et 'probabilities' (index [0][1] = proba classe positive)")
 print("  - Contrainte : un seul échantillon par appel (batch=1), pas de batch dynamique")
