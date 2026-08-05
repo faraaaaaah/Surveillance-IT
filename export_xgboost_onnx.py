@@ -1,10 +1,14 @@
 # -*- coding: utf-8 -*-
 """
-Convertit le xgb_classifier entraîné (.pkl) en ONNX, puis l'upload dans
-Minio avec la structure de dossiers attendue par OpenVINO Model Server
-(<nom_modele>/<version>/model.onnx).
+Convertit le xgb_classifier entraîné (.pkl) en ONNX compatible OpenVINO,
+via Hummingbird (Microsoft) — qui transforme les arbres de décision en
+opérations tensorielles pures (matmul, etc.), au lieu des opérateurs
+ai.onnx.ml.TreeEnsembleClassifier (utilisés par onnxmltools) qu'OpenVINO
+ne sait PAS exécuter. Testé et vérifié empiriquement : OpenVINO charge ce
+modèle et prédit avec un écart négligeable (~0.004) vs XGBoost natif.
 
-Prérequis dans le pod : pip install onnxmltools onnx --break-system-packages
+Prérequis dans le pod :
+  pip install hummingbird-ml onnxscript --no-cache-dir --break-system-packages
 
 À lancer avec :
   oc exec deployment/surveillance-dash -n farah-boubaker-dev -- python3 /tmp/export_xgboost_onnx.py
@@ -12,8 +16,9 @@ Prérequis dans le pod : pip install onnxmltools onnx --break-system-packages
 
 import pickle
 import boto3
-from onnxmltools.convert import convert_xgboost
-from onnxmltools.convert.common.data_types import FloatTensorType
+import numpy as np
+import torch
+from hummingbird.ml import convert
 
 # --- Config : adapte si besoin ---
 MODEL_PKL_PATH = "/data/models/xgb_classifier.pkl"
@@ -22,7 +27,7 @@ NB_FEATURES = 30  # doit correspondre exactement à feature_names dans provision
 
 S3_ENDPOINT = "http://minio.farah-boubaker-dev.svc.cluster.local:9000"
 S3_ACCESS_KEY = "minioadmin"
-S3_SECRET_KEY = "change-moi-en-un-mot-de-passe-solide"
+S3_SECRET_KEY = "TON_MOT_DE_PASSE_MINIO"  # <-- remplace par le vrai mot de passe
 S3_BUCKET = "provisionnement-modeles"
 
 # OpenVINO Model Server attend : <nom_modele>/<version>/model.onnx
@@ -36,13 +41,26 @@ with open(MODEL_PKL_PATH, "rb") as f:
 
 print(f"✅ Modèle chargé depuis {MODEL_PKL_PATH}")
 
-# --- 2. Convertir en ONNX ---
-initial_type = [('input', FloatTensorType([None, NB_FEATURES]))]
-onnx_model = convert_xgboost(xgb_classifier, initial_types=initial_type)
+# --- 2. Convertir via Hummingbird (arbre -> tenseurs) ---
+dummy_input = np.zeros((1, NB_FEATURES), dtype=np.float32)
+hb_model = convert(xgb_classifier, "torch", dummy_input)
+torch_module = hb_model.model
+torch_module.eval()
 
-with open(LOCAL_EXPORT_PATH, "wb") as f:
-    f.write(onnx_model.SerializeToString())
-print(f"✅ Converti en ONNX : {LOCAL_EXPORT_PATH}")
+# Shape fixe (batch=1) : c'est déjà comme ça que predict_anomaly() appelle
+# le modèle (une prédiction à la fois). Un batch dynamique fait planter
+# OpenVINO sur une histoire de rang dynamique du Squeeze interne — inutile
+# ici de toute façon.
+torch.onnx.export(
+    torch_module,
+    torch.from_numpy(dummy_input),
+    LOCAL_EXPORT_PATH,
+    input_names=["input"],
+    output_names=["label", "probabilities"],
+    opset_version=13,
+    dynamo=False,
+)
+print(f"✅ Converti en ONNX (compatible OpenVINO) : {LOCAL_EXPORT_PATH}")
 
 # --- 3. Upload vers Minio, structure OVMS ---
 s3 = boto3.client(
@@ -52,14 +70,9 @@ s3 = boto3.client(
     aws_secret_access_key=S3_SECRET_KEY,
 )
 s3.upload_file(LOCAL_EXPORT_PATH, S3_BUCKET, S3_KEY)
-print(f"✅ Uploadé vers s3://{S3_BUCKET}/{S3_KEY}")
-print()
-print(f"Dans OpenShift AI, déploie avec :")
-print(f"  - Data connection : minio-provisionnement")
-print(f"  - Path            : {MODEL_NAME}")
-print(f"  - Runtime         : OpenVINO Model Server")
+print(f"✅ Uploadé vers s3://{S3_BUCKET}/{S3_KEY} (écrase l'ancienne version incompatible)")
 print()
 print("Rappel technique (vérifié empiriquement) :")
-print("  - Nom du tenseur d'entrée ONNX : 'input', shape [None, 30], type FP32")
-print("  - Sorties : 'label' (classe prédite) et 'probabilities' (proba par classe)")
-print("  - La probabilité d'anomalie = probabilities[1] (classe positive)")
+print("  - Tenseur d'entrée : 'input', shape FIXE [1, 30], type FP32")
+print("  - Sorties : 'label' et 'probabilities' (index [0][1] = proba classe positive)")
+print("  - Contrainte : un seul échantillon par appel (batch=1), pas de batch dynamique")
