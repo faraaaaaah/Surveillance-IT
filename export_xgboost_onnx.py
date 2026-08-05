@@ -27,7 +27,7 @@ NB_FEATURES = 30  # doit correspondre exactement à feature_names dans provision
 
 S3_ENDPOINT = "http://minio.farah-boubaker-dev.svc.cluster.local:9000"
 S3_ACCESS_KEY = "minioadmin"
-S3_SECRET_KEY = "TON_MOT_DE_PASSE_MINIO"  # <-- remplace par le vrai mot de passe
+S3_SECRET_KEY = "change-moi-en-un-mot-de-passe-solide"  # <-- remplace par le vrai mot de passe
 S3_BUCKET = "provisionnement-modeles"
 
 # OpenVINO Model Server attend : <nom_modele>/<version>/model.onnx
