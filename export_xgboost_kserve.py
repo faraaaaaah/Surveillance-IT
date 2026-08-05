@@ -1,26 +1,34 @@
 # -*- coding: utf-8 -*-
 """
-Exporte le xgb_classifier entraîné (sauvegardé en .pkl) vers le format
-natif XGBoost (.bst), requis par le runtime KServe intégré à OpenShift AI,
-puis l'upload dans le bucket Minio.
+Convertit le xgb_classifier entraîné (.pkl) en ONNX, puis l'upload dans
+Minio avec la structure de dossiers attendue par OpenVINO Model Server
+(<nom_modele>/<version>/model.onnx).
+
+Prérequis dans le pod : pip install onnxmltools onnx --break-system-packages
 
 À lancer avec :
-  oc exec deployment/surveillance-dash -n farah-boubaker-dev -- python3 export_xgboost_kserve.py
-(après avoir copié ce fichier dans le pod, ou via oc cp)
+  oc exec deployment/surveillance-dash -n farah-boubaker-dev -- python3 /tmp/export_xgboost_onnx.py
 """
 
 import pickle
 import boto3
+from onnxmltools.convert import convert_xgboost
+from onnxmltools.convert.common.data_types import FloatTensorType
 
 # --- Config : adapte si besoin ---
 MODEL_PKL_PATH = "/data/models/xgb_classifier.pkl"
-LOCAL_EXPORT_PATH = "/tmp/model.bst"
+LOCAL_EXPORT_PATH = "/tmp/model.onnx"
+NB_FEATURES = 30  # doit correspondre exactement à feature_names dans provisionnement.py
 
 S3_ENDPOINT = "http://minio.farah-boubaker-dev.svc.cluster.local:9000"
 S3_ACCESS_KEY = "minioadmin"
 S3_SECRET_KEY = "change-moi-en-un-mot-de-passe-solide"
 S3_BUCKET = "provisionnement-modeles"
-S3_KEY = "xgboost/model.bst"  # KServe attend model.bst dans un "dossier" xgboost/
+
+# OpenVINO Model Server attend : <nom_modele>/<version>/model.onnx
+MODEL_NAME = "xgb-anomaly-classifier"
+MODEL_VERSION = "1"
+S3_KEY = f"{MODEL_NAME}/{MODEL_VERSION}/model.onnx"
 
 # --- 1. Charger le modèle pickle existant ---
 with open(MODEL_PKL_PATH, "rb") as f:
@@ -28,12 +36,15 @@ with open(MODEL_PKL_PATH, "rb") as f:
 
 print(f"✅ Modèle chargé depuis {MODEL_PKL_PATH}")
 
-# --- 2. Exporter au format natif XGBoost (booster) ---
-booster = xgb_classifier.get_booster()
-booster.save_model(LOCAL_EXPORT_PATH)
-print(f"✅ Exporté au format natif : {LOCAL_EXPORT_PATH}")
+# --- 2. Convertir en ONNX ---
+initial_type = [('input', FloatTensorType([None, NB_FEATURES]))]
+onnx_model = convert_xgboost(xgb_classifier, initial_types=initial_type)
 
-# --- 3. Upload vers Minio ---
+with open(LOCAL_EXPORT_PATH, "wb") as f:
+    f.write(onnx_model.SerializeToString())
+print(f"✅ Converti en ONNX : {LOCAL_EXPORT_PATH}")
+
+# --- 3. Upload vers Minio, structure OVMS ---
 s3 = boto3.client(
     "s3",
     endpoint_url=S3_ENDPOINT,
@@ -43,13 +54,12 @@ s3 = boto3.client(
 s3.upload_file(LOCAL_EXPORT_PATH, S3_BUCKET, S3_KEY)
 print(f"✅ Uploadé vers s3://{S3_BUCKET}/{S3_KEY}")
 print()
-print("Rappel de l'ordre des features attendu par ce modèle (30 valeurs, DÉJÀ standardisées via le scaler) :")
-print("""
-cpu, memoire, disque_pct, hour, day_of_week, minute, is_weekend,
-is_business_hours, cpu_rolling_mean_5, cpu_rolling_std_5,
-memoire_rolling_mean_5, memoire_rolling_std_5, disque_pct_rolling_mean_5,
-disque_pct_rolling_std_5, cpu_rolling_mean_15, memoire_rolling_mean_15,
-disque_pct_rolling_mean_15, cpu_diff_1, memoire_diff_1, disque_pct_diff_1,
-cpu_pct_change, memoire_pct_change, disque_pct_pct_change, cpu_memory_ratio,
-cpu_disk_ratio, memory_disk_ratio, hour_sin, hour_cos, day_sin, day_cos
-""")
+print(f"Dans OpenShift AI, déploie avec :")
+print(f"  - Data connection : minio-provisionnement")
+print(f"  - Path            : {MODEL_NAME}")
+print(f"  - Runtime         : OpenVINO Model Server")
+print()
+print("Rappel technique (vérifié empiriquement) :")
+print("  - Nom du tenseur d'entrée ONNX : 'input', shape [None, 30], type FP32")
+print("  - Sorties : 'label' (classe prédite) et 'probabilities' (proba par classe)")
+print("  - La probabilité d'anomalie = probabilities[1] (classe positive)")
