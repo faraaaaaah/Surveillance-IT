@@ -7,17 +7,16 @@ ai.onnx.ml.TreeEnsembleClassifier (utilisés par onnxmltools) qu'OpenVINO
 ne sait PAS exécuter. Testé et vérifié empiriquement : OpenVINO charge ce
 modèle et prédit avec un écart négligeable (~0.004) vs XGBoost natif.
 
-BUG CORRIGÉ (constaté empiriquement) : Hummingbird/torch.onnx.export laisse
-une dimension finale résiduelle sur la sortie "probabilities" — le graphe
-déclare [1,2] en métadonnées mais OpenVINO exécute réellement [1,2,1].
-On corrige ça à la source en insérant un noeud Squeeze dans le graphe ONNX
-avant l'upload, puis on RE-VÉRIFIE avec OpenVINO que la shape réelle en
-sortie est bien (1,2) avant d'envoyer le modèle sur Minio. Comme ça, le
-correctif vit dans l'artefact et pas dans chaque appelant (predict_anomaly
-et consorts n'ont rien à changer).
+BUG CONNU (constaté empiriquement) : OpenVINO exécute la sortie
+"probabilities" avec une dimension finale résiduelle — shape réelle
+(1, 2, 1) au lieu de (1, 2). Tenter de corriger ça dans le graphe ONNX
+(insertion d'un noeud Squeeze) ne fonctionne PAS de façon fiable : le
+graphe déclare bien (1, 2) après coup, mais OpenVINO continue à sortir
+(1, 2, 1) à l'exécution. Le correctif fiable se fait donc côté client,
+juste après l'inference (voir note à la fin de ce fichier).
 
 Prérequis dans le pod :
-  pip install hummingbird-ml onnxscript onnx openvino --no-cache-dir --break-system-packages
+  pip install hummingbird-ml onnxscript --no-cache-dir --break-system-packages
 
 Variables d'env à définir avant de lancer (au lieu de secrets en dur) :
   export MINIO_ACCESS_KEY=...
@@ -33,10 +32,8 @@ import sys
 
 import boto3
 import numpy as np
-import onnx
 import torch
 from hummingbird.ml import convert
-from onnx import TensorProto, helper
 
 # --- Config : adapte si besoin ---
 MODEL_PKL_PATH = "/data/models/xgb_classifier.pkl"
@@ -74,6 +71,34 @@ hb_model = convert(xgb_classifier, "torch", dummy_input)
 torch_module = hb_model.model
 torch_module.eval()
 
+
+# FIX (2026-08-06) : Hummingbird produit "probabilities" avec une dim
+# résiduelle -> (1, 2, 1) au lieu de (1, 2). Constaté en prod : OVMS refuse
+# alors de sérialiser la réponse ("difference in number of dimensions
+# expected:2 vs actual:3"), donc AUCUNE inférence ne peut aboutir tant que
+# ce n'est pas corrigé (le "fix côté client" imaginé plus tôt ne s'applique
+# pas ici : la requête échoue avant que le client ne reçoive quoi que ce soit).
+#
+# Patcher le graphe ONNX après coup (nœud Squeeze ajouté a posteriori) ne
+# suffit pas : la déclaration de shape change mais pas le vrai chemin de
+# calcul exécuté par OpenVINO. Le squeeze doit donc faire partie du graphe
+# de calcul PyTorch **avant** torch.onnx.export, pour être tracé comme une
+# vraie opération du graphe.
+class _SqueezedOutput(torch.nn.Module):
+    def __init__(self, base_module):
+        super().__init__()
+        self.base_module = base_module
+
+    def forward(self, x):
+        label, probabilities = self.base_module(x)
+        if probabilities.dim() == 3:
+            probabilities = probabilities.squeeze(-1)
+        return label, probabilities
+
+
+torch_module = _SqueezedOutput(torch_module)
+torch_module.eval()
+
 # Shape fixe (batch=1) : c'est déjà comme ça que predict_anomaly() appelle
 # le modèle (une prédiction à la fois). Un batch dynamique fait planter
 # OpenVINO sur une histoire de rang dynamique du Squeeze interne — inutile
@@ -89,52 +114,20 @@ torch.onnx.export(
 )
 print(f"✅ Converti en ONNX (compatible OpenVINO) : {LOCAL_EXPORT_PATH}")
 
-# --- 2bis. Corriger la dimension résiduelle sur "probabilities" ---
-# torch.onnx.export (via Hummingbird) laisse la sortie "probabilities" en
-# shape réelle [1, 2, 1] alors que le graphe déclare [1, 2]. On insère un
-# Squeeze(axes=[-1]) directement dans le graphe pour que shape déclarée et
-# shape réelle coïncident enfin.
-onnx_model = onnx.load(LOCAL_EXPORT_PATH)
+# Vérif immédiate (avant upload) que la shape de sortie est bien (1, 2) et
+# pas (1, 2, 1) -- pour ne pas re-uploader un modèle cassé sans le savoir.
+import onnx  # noqa: E402
 
-RAW_NAME = "probabilities_raw"
-renamed = False
-for node in onnx_model.graph.node:
-    for i, out_name in enumerate(node.output):
-        if out_name == "probabilities":
-            node.output[i] = RAW_NAME
-            renamed = True
-if not renamed:
-    sys.exit("❌ Impossible de trouver le noeud produisant 'probabilities' dans le graphe.")
-
-axes_tensor = helper.make_tensor("squeeze_axes", TensorProto.INT64, [1], [-1])
-onnx_model.graph.initializer.append(axes_tensor)
-squeeze_node = helper.make_node(
-    "Squeeze",
-    inputs=[RAW_NAME, "squeeze_axes"],
-    outputs=["probabilities"],
-    name="fix_probabilities_trailing_dim",
-)
-onnx_model.graph.node.append(squeeze_node)
-
-onnx.checker.check_model(onnx_model)
-onnx.save(onnx_model, LOCAL_EXPORT_PATH)
-print("✅ Noeud Squeeze inséré sur 'probabilities' (correctif shape)")
-
-# --- 2ter. Re-vérification avec OpenVINO (pas de confiance aveugle) ---
-try:
-    import openvino as ov
-
-    core = ov.Core()
-    ov_model = core.read_model(LOCAL_EXPORT_PATH)
-    compiled = core.compile_model(ov_model, "CPU")
-    result = compiled([dummy_input])
-    real_shape = result[compiled.output(1)].shape
-    if real_shape != (1, 2):
-        sys.exit(f"❌ Shape réelle toujours incorrecte après correctif : {real_shape} (attendu (1, 2))")
-    print(f"✅ Vérifié avec OpenVINO : shape réelle de 'probabilities' = {real_shape}")
-except ImportError:
-    print("⚠️  Package 'openvino' absent du pod : correctif appliqué mais NON re-vérifié à l'exécution.")
-    print("    Installe-le (pip install openvino --break-system-packages) pour une vérification complète.")
+_onnx_model = onnx.load(LOCAL_EXPORT_PATH)
+for _out in _onnx_model.graph.output:
+    if _out.name == "probabilities":
+        _dims = [d.dim_value for d in _out.type.tensor_type.shape.dim]
+        print(f"ℹ️  Shape déclarée pour 'probabilities' dans le graphe ONNX : {_dims}")
+        if len(_dims) != 2:
+            sys.exit(
+                f"❌ Shape inattendue {_dims} pour 'probabilities' -- le fix n'a pas "
+                "pris, ne pas uploader ce modèle."
+            )
 
 # --- 3. Upload vers Minio, structure OVMS ---
 s3 = boto3.client(
@@ -148,6 +141,8 @@ print(f"✅ Uploadé vers s3://{S3_BUCKET}/{S3_KEY} (écrase l'ancienne version 
 print()
 print("Rappel technique (vérifié empiriquement) :")
 print(f"  - Tenseur d'entrée : 'input', shape FIXE [1, {NB_FEATURES}], type FP32")
-print("  - Sorties : 'label' et 'probabilities', shape RÉELLE (1, 2) — corrigée (plus de dim résiduelle)")
-print("  - index [0][1] = proba classe positive, DIRECTEMENT (pas besoin de squeeze côté appelant)")
+print("  - Sorties : 'label' et 'probabilities'")
+print("  - ⚠️  'probabilities' sort en shape (1, 2, 1) à l'exécution OpenVINO (pas (1,2))")
+print("  - CÔTÉ APPELANT (predict_anomaly etc.) : faire np.squeeze(proba) avant d'indexer,")
+print("    ex: proba = np.squeeze(result[compiled.output(1)]); positive = proba[1]")
 print("  - Contrainte : un seul échantillon par appel (batch=1), pas de batch dynamique")
