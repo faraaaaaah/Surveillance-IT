@@ -91,8 +91,16 @@ class _SqueezedOutput(torch.nn.Module):
 
     def forward(self, x):
         label, probabilities = self.base_module(x)
-        if probabilities.dim() == 3:
-            probabilities = probabilities.squeeze(-1)
+        # IMPORTANT : reshape INCONDITIONNEL, pas un `if dim()==3: squeeze`.
+        # Pendant le trace natif PyTorch, probabilities est déjà (1,2) donc
+        # une condition sur dim()==3 est fausse au moment du trace et n'est
+        # JAMAIS incluse dans le graphe exporté. Le bug (1,2,1) n'apparaît
+        # qu'à l'exécution par OpenVINO du graphe ONNX (comportement runtime
+        # différent de PyTorch sur une opération interne d'Hummingbird).
+        # Un reshape inconditionnel devient un vrai noeud Reshape dans le
+        # graphe ONNX, exécuté par OpenVINO sur SA propre sortie interne
+        # (même bugguée à 3D), et la force à (batch, 2) quoi qu'il arrive.
+        probabilities = probabilities.reshape(1, 2)
         return label, probabilities
 
 
