@@ -1,0 +1,8 @@
+{
+  "name": "xgb-anomaly-classifier",
+  "implementation": "mlserver_xgboost.XGBoostModel",
+  "parameters": {
+    "uri": "./model.bst",
+    "version": "v1"
+  }
+}

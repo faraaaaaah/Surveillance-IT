@@ -1,0 +1,29 @@
+apiVersion: serving.kserve.io/v1alpha1
+kind: ServingRuntime
+metadata:
+  name: mlserver-xgboost
+  namespace: farah-boubaker-dev
+spec:
+  supportedModelFormats:
+    - name: xgboost
+      version: "1"
+      autoSelect: true
+  protocolVersions:
+    - v2
+  containers:
+    - name: kserve-container
+      image: docker.io/seldonio/mlserver:1.6.1
+      env:
+        - name: MLSERVER_MODEL_IMPLEMENTATION
+          value: mlserver_xgboost.XGBoostModel
+        - name: MLSERVER_MODEL_NAME
+          value: xgb-anomaly-classifier
+        - name: MLSERVER_MODEL_URI
+          value: /mnt/models
+      resources:
+        requests:
+          cpu: "500m"
+          memory: "1Gi"
+        limits:
+          cpu: "2"
+          memory: "2Gi"
