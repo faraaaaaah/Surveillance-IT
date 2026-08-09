@@ -143,7 +143,10 @@ class ProductionConfig:
         cls.S3_SECRET_KEY = cls.get_env("S3_SECRET_KEY")
         
         # === KServe ===
-        cls.KSERVE_ENDPOINT = cls.get_env("KSERVE_ENDPOINT", "http://kserve.model-serving.svc.cluster.local")
+        cls.KSERVE_ENDPOINT = cls.get_env(
+            "KSERVE_ENDPOINT",
+            "http://xgb-anomaly-classifier-native-predictor.farah-boubaker-dev.svc.cluster.local",
+        )
         cls.KSERVE_NAMESPACE = cls.get_env("KSERVE_NAMESPACE", "model-serving")
         
         # === LOGGING ===
@@ -1003,6 +1006,40 @@ class ProvisionnementML:
             finally:
                 self.training_in_progress = False
     
+    def _predict_anomaly_prob_remote(self, X_last_row: np.ndarray) -> Optional[float]:
+        """
+        Appelle le modèle XGBoost natif servi par MLServer (KServe, protocole
+        Open Inference V2) pour obtenir la probabilité d'anomalie.
+
+        Retourne None en cas d'échec (timeout, service indisponible, réponse
+        invalide) pour permettre un repli (fallback) sur le pickle local sans
+        jamais faire planter predict_anomaly().
+        """
+        try:
+            n_features = X_last_row.shape[0]
+            url = (
+                f"{self.config.KSERVE_ENDPOINT}/v2/models/xgb-anomaly-classifier/infer"
+            )
+            payload = {
+                "inputs": [
+                    {
+                        "name": "predict",
+                        "shape": [1, n_features],
+                        "datatype": "FP32",
+                        "data": X_last_row.astype(float).tolist(),
+                    }
+                ]
+            }
+            response = requests.post(url, json=payload, timeout=2)
+            response.raise_for_status()
+            result = response.json()
+            return float(result["outputs"][0]["data"][0])
+        except Exception as e:
+            self.logger.warning(
+                f"⚠️ Échec de l'inférence distante MLServer, repli sur le modèle local : {e}"
+            )
+            return None
+
     def predict_anomaly(self, server: str, recent_measures: List[Dict]) -> Dict:
         """Prédit les anomalies futures"""
         try:
@@ -1047,8 +1084,13 @@ class ProvisionnementML:
             # Normaliser
             X = self.scaler.transform(df.drop(['horodatage'], axis=1).values)
             
-            # XGBoost
-            anomaly_prob = self.xgb_classifier.predict_proba(X)[-1][1]
+            # XGBoost — inférence via MLServer (format natif, KServe), avec
+            # repli automatique sur le pickle local si le service est
+            # indisponible (pas de rupture de service en cas de problème
+            # réseau/infra ponctuel)
+            anomaly_prob = self._predict_anomaly_prob_remote(X[-1])
+            if anomaly_prob is None:
+                anomaly_prob = self.xgb_classifier.predict_proba(X)[-1][1]
             time_to_anomaly = self.xgb_regressor.predict([X[-1]])[0]
             
             # LSTM
