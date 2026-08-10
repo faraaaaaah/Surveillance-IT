@@ -1255,6 +1255,16 @@ def get_storage():
         _storage = DurableStorage()
     return _storage
 
+def _num(value, default: float = 0.0) -> float:
+    """Convertit une valeur en float de façon sûre (certaines valeurs
+    peuvent arriver en str depuis le JSON/la base, ce qui casse les
+    filtres Jinja `round()` du template)."""
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return default
+
+
 def generer_previsions(serveur: str) -> List[Dict]:
     """Fonction de compatibilité"""
     integrator = get_integrator()
@@ -1276,18 +1286,26 @@ def generer_previsions(serveur: str) -> List[Dict]:
     if prediction.get('probabilite_anomalie', 0) < Config.PREVISION_MIN_PROBABILITE:
         return []
     
+    valeurs_actuelles = prediction['valeurs_actuelles']
+    metrics_predites = {
+        k: _num(v) for k, v in prediction.get('metrics_predites', {}).items()
+    }
+    feature_importance = {
+        k: _num(v) for k, v in prediction.get('feature_importance', {}).items()
+    }
+
     prevision = {
         'serveur': serveur,
         'type_anomalie': 'multi',
         'niveau_cible': 'critique' if prediction['niveau_risque'] == 'CRITIQUE' else 'warning',
-        'valeur_actuelle': max(prediction['valeurs_actuelles'].values()),
-        'confiance': prediction['confiance'],
-        'probabilite': prediction['probabilite_anomalie'],
-        'temps_estime': prediction['temps_estime_avant_anomalie'],
-        'feature_importance': prediction['feature_importance'],
-        'ml_confidence': 'haute' if prediction['confiance'] > 0.7 else 'moyenne',
-        'metrics': prediction['valeurs_actuelles'],
-        'metrics_predites': prediction['metrics_predites'],
+        'valeur_actuelle': _num(max(valeurs_actuelles.values(), key=_num)),
+        'confiance': _num(prediction['confiance']),
+        'probabilite': _num(prediction['probabilite_anomalie']),
+        'temps_estime': _num(prediction['temps_estime_avant_anomalie']),
+        'feature_importance': feature_importance,
+        'ml_confidence': 'haute' if _num(prediction['confiance']) > 0.7 else 'moyenne',
+        'metrics': valeurs_actuelles,
+        'metrics_predites': metrics_predites,
         'ensemble_details': prediction.get('ensemble_details', {}),
         'performance_metrics': prediction.get('performance_metrics', {})
     }
