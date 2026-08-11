@@ -1386,9 +1386,13 @@ def apercu_serveur(serveur: str) -> Dict:
     metrics_predites = {
         k: _num(v) for k, v in prediction.get('metrics_predites', {}).items()
     }
-    feature_importance = {
-        k: _num(v) for k, v in prediction.get('feature_importance', {}).items()
-    }
+    feature_importance = dict(
+        sorted(
+            ((k, _num(v)) for k, v in prediction.get('feature_importance', {}).items()),
+            key=lambda kv: kv[1],
+            reverse=True,
+        )[:5]
+    )
     confiance = _num(prediction.get('confiance'))
 
     base.update({
@@ -1816,7 +1820,7 @@ _PAGE = """
 
       {% if p.feature_importance %}
       <div class="feature-importance">
-        {% for feature, importance in p.feature_importance.items()|sort(by='value', reverse=true)|slice(5) %}
+        {% for feature, importance in p.feature_importance.items() %}
         <span class="feature-tag">{{ feature }}: {{ ((importance|float) * 100)|round(0) }}%</span>
         {% endfor %}
       </div>
