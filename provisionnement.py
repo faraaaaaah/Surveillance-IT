@@ -1329,9 +1329,9 @@ def generer_previsions_simple(serveur: str) -> List[Dict]:
         if not tendance:
             continue
 
-        pente = tendance['pente_par_heure']
-        valeur_actuelle = tendance['valeur_actuelle']
-        confiance = tendance['confiance']
+        pente = _num(tendance['pente_par_heure'])
+        valeur_actuelle = _num(tendance['valeur_actuelle'])
+        confiance = _num(tendance['confiance'])
 
         # Pas de tendance à la hausse exploitable, ou régression trop
         # bruitée (r2 faible), ou déjà au-dessus du seuil (ce n'est plus
@@ -1690,7 +1690,7 @@ _PAGE = """
           </div>
         </div>
         <div>
-          <span class="badge {{ confidence_class }}">{{ (p.confiance * 100)|round(0) }}%</span>
+          <span class="badge {{ confidence_class }}">{{ ((p.confiance|float) * 100)|round(0) }}%</span>
         </div>
       </div>
 
@@ -1707,15 +1707,15 @@ _PAGE = """
 
       <div class="metric-grid">
         <div class="metric-item">
-          <div class="metric-value">{{ p.temps_estime|round(1) }}h</div>
+          <div class="metric-value">{{ (p.temps_estime|float)|round(1) }}h</div>
           <div class="metric-label">Temps estimé</div>
         </div>
         <div class="metric-item">
-          <div class="metric-value">{{ p.valeur_actuelle|round(1) }}%</div>
+          <div class="metric-value">{{ (p.valeur_actuelle|float)|round(1) }}%</div>
           <div class="metric-label">Valeur actuelle</div>
         </div>
         <div class="metric-item">
-          <div class="metric-value">{{ p.metrics_predites|first|last|round(1) if p.metrics_predites else '—' }}%</div>
+          <div class="metric-value">{{ (p.metrics_predites|first|last|float)|round(1) if p.metrics_predites else '—' }}%</div>
           <div class="metric-label">Valeur prédite</div>
         </div>
       </div>
@@ -1723,7 +1723,7 @@ _PAGE = """
       {% if p.feature_importance %}
       <div class="feature-importance">
         {% for feature, importance in p.feature_importance.items()|sort(by='value', reverse=true)|slice(5) %}
-        <span class="feature-tag">{{ feature }}: {{ (importance * 100)|round(0) }}%</span>
+        <span class="feature-tag">{{ feature }}: {{ ((importance|float) * 100)|round(0) }}%</span>
         {% endfor %}
       </div>
       {% endif %}
