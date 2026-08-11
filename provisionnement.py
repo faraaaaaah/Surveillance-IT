@@ -1313,6 +1313,100 @@ def generer_previsions(serveur: str) -> List[Dict]:
     return [prevision]
 
 
+def apercu_serveur(serveur: str) -> Dict:
+    """Statut ML toujours renvoyé pour un serveur, utilisé uniquement pour
+    l'affichage de la page /provisionnement (contrairement à
+    generer_previsions(), utilisée par la boucle d'alerting toutes les 5
+    minutes, qui ne renvoie que les vrais risques pour ne pas spammer de
+    fausses alertes). Ici on veut TOUJOURS montrer où en est le modèle sur
+    chaque serveur, même quand tout va bien.
+    """
+    integrator = get_integrator()
+    recent_measures = historique.recuperer_mesures(serveur, heures=2)
+
+    base = {
+        'serveur': serveur,
+        'type_anomalie': 'multi',
+        'feature_importance': {},
+        'metrics': {},
+        'metrics_predites': {},
+        'ensemble_details': {},
+        'performance_metrics': {},
+        'temps_estime': 0.0,
+        'probabilite': 0.0,
+        'confiance': 0.0,
+        'valeur_actuelle': 0.0,
+    }
+
+    if len(recent_measures) < 10:
+        base.update({
+            'niveau_cible': 'collecte',
+            'ml_confidence': f"Collecte de données en cours ({len(recent_measures)}/10 mesures)",
+        })
+        return base
+
+    prediction = integrator.predict_anomaly(serveur, recent_measures)
+
+    if 'error' in prediction:
+        # Modèle complet pas encore entraîné : on affiche quand même un
+        # statut basé sur la régression simple si elle donne quelque
+        # chose, sinon un statut "sain" par défaut (pas assez de recul
+        # pour dire qu'il y a un risque).
+        simples = generer_previsions_simple(serveur)
+        if simples:
+            p = simples[0]
+            base.update({
+                'niveau_cible': p['niveau_cible'],
+                'valeur_actuelle': _num(p.get('valeur_actuelle')),
+                'confiance': _num(p.get('confiance')),
+                'probabilite': _num(p.get('probabilite')),
+                'temps_estime': _num(p.get('temps_estime')),
+                'metrics': p.get('metrics', {}),
+                'ensemble_details': p.get('ensemble_details', {}),
+                'ml_confidence': p.get('ml_confidence', 'estimation simple'),
+            })
+            return base
+        base.update({
+            'niveau_cible': 'sain',
+            'ml_confidence': "estimation simple (historique insuffisant pour le ML complet)",
+        })
+        return base
+
+    proba = _num(prediction.get('probabilite_anomalie', 0))
+    if proba >= 70:
+        niveau = 'critique'
+    elif proba >= Config.PREVISION_MIN_PROBABILITE:
+        niveau = 'warning'
+    elif proba >= 15:
+        niveau = 'surveillance'
+    else:
+        niveau = 'sain'
+
+    valeurs_actuelles = prediction.get('valeurs_actuelles', {})
+    metrics_predites = {
+        k: _num(v) for k, v in prediction.get('metrics_predites', {}).items()
+    }
+    feature_importance = {
+        k: _num(v) for k, v in prediction.get('feature_importance', {}).items()
+    }
+    confiance = _num(prediction.get('confiance'))
+
+    base.update({
+        'niveau_cible': niveau,
+        'valeur_actuelle': _num(max(valeurs_actuelles.values(), key=_num)) if valeurs_actuelles else 0.0,
+        'confiance': confiance,
+        'probabilite': proba,
+        'temps_estime': _num(prediction.get('temps_estime_avant_anomalie')),
+        'feature_importance': feature_importance,
+        'ml_confidence': 'haute' if confiance > 0.7 else 'moyenne' if confiance > 0.4 else 'basse',
+        'metrics': valeurs_actuelles,
+        'metrics_predites': metrics_predites,
+        'ensemble_details': prediction.get('ensemble_details', {}),
+        'performance_metrics': prediction.get('performance_metrics', {}),
+    })
+    return base
+
+
 def generer_previsions_simple(serveur: str) -> List[Dict]:
     """Prévisions de secours par régression linéaire (calculer_tendance),
     utilisées tant qu'il n'y a pas assez d'historique pour entraîner
@@ -1648,7 +1742,7 @@ _PAGE = """
     <div style="margin-top: 8px;">
       <span class="badge badge-low">Modèles entraînés</span>
       <span class="badge badge-moderate">Auto-adaptatif</span>
-      <span class="badge badge-high">{{ previsions|length }} prévisions actives</span>
+      <span class="badge badge-high">{{ stats.active_predictions|default(0) }} prévisions actives</span>
       {% if openshift_mode %}
       <span class="openshift-badge">☁️ OpenShift AI</span>
       {% endif %}
@@ -1679,7 +1773,7 @@ _PAGE = """
   {% if previsions %}
   <div class="ml-dashboard">
     {% for p in previsions %}
-    {% set risk_class = 'risk-critical' if p.niveau_cible == 'critique' else 'risk-high' if p.niveau_cible == 'warning' else 'risk-moderate' %}
+    {% set risk_class = 'risk-critical' if p.niveau_cible == 'critique' else 'risk-high' if p.niveau_cible == 'warning' else 'risk-moderate' if p.niveau_cible == 'surveillance' else 'risk-low' %}
     {% set confidence_class = 'badge-high-confidence' if p.ml_confidence == 'haute' else 'badge-medium-confidence' if p.ml_confidence == 'moyenne' else 'badge-low-confidence' %}
     <div class="ml-card {{ risk_class }}">
       <div style="display: flex; justify-content: space-between; align-items: start;">
@@ -1825,11 +1919,14 @@ def page_provisionnement():
     }
     
     for serveur in autorisees:
-        previsions = generer_previsions(serveur)
-        if previsions:
-            for p in previsions:
-                p['phrase'] = phrase_prevision_ml(p)
-            all_previsions.extend(previsions)
+        apercu = apercu_serveur(serveur)
+        if apercu['niveau_cible'] == 'collecte':
+            apercu['phrase'] = f"🔵 Collecte de données en cours pour {serveur} — pas encore assez d'historique pour une prédiction fiable."
+        elif apercu['niveau_cible'] == 'sain':
+            apercu['phrase'] = f"🟢 {serveur} : aucune tendance à risque détectée actuellement."
+        else:
+            apercu['phrase'] = phrase_prevision_ml(apercu)
+        all_previsions.append(apercu)
         
         status = integrator.health_check()
         if status.get('performance'):
@@ -1837,7 +1934,7 @@ def page_provisionnement():
         if status.get('feature_importance'):
             stats['features_importance'] = max(stats['features_importance'], len(status.get('feature_importance', {})))
     
-    stats['active_predictions'] = len(all_previsions)
+    stats['active_predictions'] = sum(1 for p in all_previsions if p['niveau_cible'] in ('warning', 'critique'))
     if all_previsions:
         stats['avg_confidence'] = sum(p.get('confiance', 0) for p in all_previsions) / len(all_previsions)
     
