@@ -472,6 +472,9 @@ def render_menu_utilisateur(page_active: str = None) -> str:
         liens_admin = (
             f'<a href="{url_for("auth.admin_utilisateurs")}" class="item">👤 Utilisateurs</a>'
             f'<a href="{url_for("destinataires.page_responsables")}" class="item">📣 Responsables</a>'
+            f'<a href="{url_for("groupes.page_liste")}" class="item">🗂️ Groupes</a>'
+            f'<a href="{url_for("assignations.page_liste")}" class="item">🎯 Assignations</a>'
+            f'<a href="{url_for("audit.page_audit")}" class="item">📜 Journal d\'audit</a>'
             f'<a href="{url_for("parametres.page_parametres")}" class="item">✉️ Email</a>'
             f'<div class="separateur"></div>'
         )
@@ -515,6 +518,9 @@ def render_topbar(page_active: str) -> str:
         liens_admin_nav = (
             f'<a href="{url_for("auth.admin_utilisateurs")}" class="{cls("utilisateurs")}">Utilisateurs</a>'
             f'<a href="{url_for("destinataires.page_responsables")}" class="{cls("responsables")}">Responsables</a>'
+            f'<a href="{url_for("groupes.page_liste")}" class="{cls("groupes")}">Groupes</a>'
+            f'<a href="{url_for("assignations.page_liste")}" class="{cls("assignations")}">Assignations</a>'
+            f'<a href="{url_for("audit.page_audit")}" class="{cls("audit")}">Audit</a>'
             f'<a href="{url_for("parametres.page_parametres")}" class="{cls("parametres")}">Email</a>'
         )
     return f"""

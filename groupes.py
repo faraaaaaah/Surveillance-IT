@@ -203,118 +203,150 @@ groupes_bp = Blueprint("groupes", __name__)
 
 _PAGE_LISTE = """
 <!doctype html><html lang="fr"><head><meta charset="utf-8">
-<title>Groupes</title>
+<title>Groupes - SENTINEL</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
 <style>
-  body{font-family:system-ui,sans-serif;background:#0f1115;color:#e6e6e6;padding:2rem;max-width:820px;margin:0 auto}
-  a{color:#3b82f6}
-  .msg{color:#4ade80;margin-bottom:1rem}
-  input{padding:.5rem;border-radius:6px;border:1px solid #333;background:#1a1d24;color:#e6e6e6;margin-right:.4rem}
-  button{padding:.5rem 1rem;border:0;border-radius:6px;background:#3b82f6;color:#fff;cursor:pointer}
-  .danger{background:#e01e5a}
-  .carte{background:#1a1d24;border:1px solid #2a2d34;border-radius:8px;padding:1rem 1.2rem;margin:1rem 0;
-         display:flex;justify-content:space-between;align-items:center}
-  .carte h3{margin:0 0 .2rem}
-  .carte p{margin:0;color:#9aa0aa;font-size:.85rem}
-  .vide{color:#9aa0aa}
+""" + auth.TOKENS_CSS + """
+  .liste-groupes{display:flex; flex-direction:column; gap:12px;}
+  .groupe-item{display:flex; justify-content:space-between; align-items:center;
+               background:var(--panel); border:1px solid var(--border); border-radius:12px; padding:16px 20px;}
+  .groupe-item h3{margin:0 0 4px; font-size:14px;}
+  .groupe-item p{margin:0; color:var(--muted); font-size:12.5px;}
+  .groupe-actions{display:flex; gap:8px;}
 </style></head><body>
-<p><a href="{{ url_for('accueil') }}">&larr; Retour au dashboard</a></p>
-<h1>Groupes</h1>
-{% if msg %}<div class="msg">{{ msg }}</div>{% endif %}
+<script>(function(){ if(localStorage.getItem('sentinel-theme') === 'light'){ document.body.classList.add('light'); } })();</script>
 
-<h3>Nouveau groupe</h3>
-<form method="post" action="{{ url_for('groupes.creer_route') }}">
-  <input name="nom" placeholder="ex. equipe-reseau" required>
-  <input name="description" placeholder="description (optionnel)" style="width:280px">
-  <button type="submit">Creer</button>
-</form>
+""" + "{{ topbar|safe }}" + """
 
-{% if groupes %}
-  {% for g in groupes %}
-  <div class="carte">
-    <div>
-      <h3>{{ g.nom }}</h3>
-      <p>{{ g.description or 'Pas de description' }} — {{ g.nb_machines }} machine(s), {{ g.nb_utilisateurs }} utilisateur(s)</p>
-    </div>
-    <div>
-      <a href="{{ url_for('groupes.page_detail', groupe_id=g.id) }}"><button type="button">Gerer</button></a>
-      <form method="post" action="{{ url_for('groupes.supprimer_route', groupe_id=g.id) }}" style="display:inline">
-        <button type="submit" class="danger">Supprimer</button>
-      </form>
-    </div>
+<main class="contenu">
+  <div class="page-entete">
+    <h1>🗂️ Groupes</h1>
+    <p>Regroupe des machines et des utilisateurs pour gerer les acces par lot plutot qu'un par un.</p>
   </div>
-  {% endfor %}
-{% else %}
-  <p class="vide">Aucun groupe pour le moment.</p>
-{% endif %}
+
+  {% if msg %}<div class="toast">{{ msg }}</div>{% endif %}
+
+  <div class="carte">
+    <h3>Nouveau groupe</h3>
+    <p class="aide-carte">ex. equipe-reseau, datacenter-tunis…</p>
+    <form method="post" action="{{ url_for('groupes.creer_route') }}">
+      <div class="champs-form">
+        <div class="champ"><label>Nom</label><input name="nom" placeholder="ex. equipe-reseau" required></div>
+        <div class="champ"><label>Description</label><input name="description" placeholder="description (optionnel)"></div>
+        <button type="submit" class="btn-principal">+ Creer</button>
+      </div>
+    </form>
+  </div>
+
+  <div class="carte">
+    <h3 style="margin-bottom:14px;">Groupes existants</h3>
+    {% if groupes %}
+    <div class="liste-groupes">
+      {% for g in groupes %}
+      <div class="groupe-item">
+        <div>
+          <h3>{{ g.nom }}</h3>
+          <p>{{ g.description or 'Pas de description' }} — {{ g.nb_machines }} machine(s), {{ g.nb_utilisateurs }} utilisateur(s)</p>
+        </div>
+        <div class="groupe-actions">
+          <a href="{{ url_for('groupes.page_detail', groupe_id=g.id) }}"><button type="button" class="btn-fantome">Gerer</button></a>
+          <form method="post" action="{{ url_for('groupes.supprimer_route', groupe_id=g.id) }}" style="display:inline"
+                onsubmit="return confirm('Supprimer le groupe {{ g.nom }} ?');">
+            <button type="submit" class="btn-danger">Supprimer</button>
+          </form>
+        </div>
+      </div>
+      {% endfor %}
+    </div>
+    {% else %}
+    <div class="vide-etat">Aucun groupe pour le moment.</div>
+    {% endif %}
+  </div>
+</main>
+
+<script>""" + auth.JS_TEMA_ET_MENU + """</script>
 </body></html>
 """
 
 _PAGE_DETAIL = """
 <!doctype html><html lang="fr"><head><meta charset="utf-8">
-<title>Groupe {{ groupe.nom }}</title>
+<title>Groupe {{ groupe.nom }} - SENTINEL</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
 <style>
-  body{font-family:system-ui,sans-serif;background:#0f1115;color:#e6e6e6;padding:2rem;max-width:820px;margin:0 auto}
-  a{color:#3b82f6}
-  .msg{color:#4ade80;margin-bottom:1rem}
-  .colonnes{display:flex;gap:1.5rem;margin-top:1.5rem}
-  .colonne{flex:1;background:#1a1d24;border:1px solid #2a2d34;border-radius:8px;padding:1rem 1.2rem}
-  .colonne h3{margin-top:0}
-  .item{display:flex;justify-content:space-between;align-items:center;padding:.4rem 0;border-bottom:1px solid #2a2d34}
-  select,button{padding:.4rem .6rem;border-radius:6px;border:1px solid #333;background:#0f1115;color:#e6e6e6}
-  button{background:#3b82f6;border:0;color:#fff;cursor:pointer}
-  button.retirer{background:#e01e5a}
-  .vide{color:#9aa0aa;font-size:.85rem}
-  form.ajout{display:flex;gap:.4rem;margin-top:.8rem}
+""" + auth.TOKENS_CSS + """
+  .colonnes{display:flex; gap:20px; flex-wrap:wrap;}
+  .colonne{flex:1; min-width:280px;}
+  .colonne h3{margin:0 0 12px; font-size:14px;}
+  .item-liste{display:flex; justify-content:space-between; align-items:center; padding:10px 0;
+              border-bottom:1px solid var(--border); font-size:13.5px;}
+  .item-liste:last-of-type{border-bottom:none;}
+  form.ajout{display:flex; gap:8px; margin-top:14px;}
+  .lien-retour{display:inline-block; margin-bottom:14px; font-size:13px; color:var(--muted);}
+  .lien-retour:hover{color:var(--text);}
 </style></head><body>
-<p><a href="{{ url_for('groupes.page_liste') }}">&larr; Retour aux groupes</a></p>
-<h1>{{ groupe.nom }}</h1>
-{% if msg %}<div class="msg">{{ msg }}</div>{% endif %}
+<script>(function(){ if(localStorage.getItem('sentinel-theme') === 'light'){ document.body.classList.add('light'); } })();</script>
 
-<div class="colonnes">
-  <div class="colonne">
-    <h3>Machines</h3>
-    {% for m in machines %}
-      <div class="item">{{ m }}
+""" + "{{ topbar|safe }}" + """
+
+<main class="contenu">
+  <a class="lien-retour" href="{{ url_for('groupes.page_liste') }}">&larr; Retour aux groupes</a>
+  <div class="page-entete">
+    <h1>🗂️ {{ groupe.nom }}</h1>
+    <p>{{ groupe.description or 'Pas de description' }}</p>
+  </div>
+
+  {% if msg %}<div class="toast">{{ msg }}</div>{% endif %}
+
+  <div class="colonnes">
+    <div class="carte colonne">
+      <h3>Machines</h3>
+      {% for m in machines %}
+      <div class="item-liste">
+        <span>{{ m }}</span>
         <form method="post" action="{{ url_for('groupes.retirer_machine_route', groupe_id=groupe.id) }}">
           <input type="hidden" name="machine" value="{{ m }}">
-          <button type="submit" class="retirer">Retirer</button>
+          <button type="submit" class="btn-danger">Retirer</button>
         </form>
       </div>
-    {% else %}
-      <p class="vide">Aucune machine dans ce groupe.</p>
-    {% endfor %}
-    {% if machines_disponibles %}
-    <form class="ajout" method="post" action="{{ url_for('groupes.ajouter_machine_route', groupe_id=groupe.id) }}">
-      <select name="machine">
-        {% for m in machines_disponibles %}<option value="{{ m }}">{{ m }}</option>{% endfor %}
-      </select>
-      <button type="submit">Ajouter</button>
-    </form>
-    {% endif %}
-  </div>
+      {% else %}
+      <div class="vide-etat">Aucune machine dans ce groupe.</div>
+      {% endfor %}
+      {% if machines_disponibles %}
+      <form class="ajout" method="post" action="{{ url_for('groupes.ajouter_machine_route', groupe_id=groupe.id) }}">
+        <select name="machine">
+          {% for m in machines_disponibles %}<option value="{{ m }}">{{ m }}</option>{% endfor %}
+        </select>
+        <button type="submit" class="btn-principal">Ajouter</button>
+      </form>
+      {% endif %}
+    </div>
 
-  <div class="colonne">
-    <h3>Utilisateurs</h3>
-    {% for u in utilisateurs_membres %}
-      <div class="item">{{ u.username }}
+    <div class="carte colonne">
+      <h3>Utilisateurs</h3>
+      {% for u in utilisateurs_membres %}
+      <div class="item-liste">
+        <span>{{ u.username }}</span>
         <form method="post" action="{{ url_for('groupes.retirer_utilisateur_route', groupe_id=groupe.id) }}">
           <input type="hidden" name="user_id" value="{{ u.id }}">
-          <button type="submit" class="retirer">Retirer</button>
+          <button type="submit" class="btn-danger">Retirer</button>
         </form>
       </div>
-    {% else %}
-      <p class="vide">Aucun utilisateur dans ce groupe.</p>
-    {% endfor %}
-    {% if utilisateurs_disponibles %}
-    <form class="ajout" method="post" action="{{ url_for('groupes.ajouter_utilisateur_route', groupe_id=groupe.id) }}">
-      <select name="user_id">
-        {% for u in utilisateurs_disponibles %}<option value="{{ u.id }}">{{ u.username }}</option>{% endfor %}
-      </select>
-      <button type="submit">Ajouter</button>
-    </form>
-    {% endif %}
+      {% else %}
+      <div class="vide-etat">Aucun utilisateur dans ce groupe.</div>
+      {% endfor %}
+      {% if utilisateurs_disponibles %}
+      <form class="ajout" method="post" action="{{ url_for('groupes.ajouter_utilisateur_route', groupe_id=groupe.id) }}">
+        <select name="user_id">
+          {% for u in utilisateurs_disponibles %}<option value="{{ u.id }}">{{ u.username }}</option>{% endfor %}
+        </select>
+        <button type="submit" class="btn-principal">Ajouter</button>
+      </form>
+      {% endif %}
+    </div>
   </div>
-</div>
+</main>
+
+<script>""" + auth.JS_TEMA_ET_MENU + """</script>
 </body></html>
 """
 
@@ -326,7 +358,10 @@ def page_liste():
     for g in groupes:
         g["nb_machines"] = len(machines_du_groupe(g["id"]))
         g["nb_utilisateurs"] = len(utilisateurs_du_groupe(g["id"]))
-    return render_template_string(_PAGE_LISTE, groupes=groupes, msg=request.args.get("msg"))
+    return render_template_string(
+        _PAGE_LISTE, groupes=groupes, msg=request.args.get("msg"),
+        topbar=auth.render_topbar("groupes"),
+    )
 
 
 @groupes_bp.route("/admin/groupes/creer", methods=["POST"])
@@ -373,6 +408,7 @@ def page_detail(groupe_id):
         utilisateurs_membres=utilisateurs_membres,
         utilisateurs_disponibles=utilisateurs_disponibles,
         msg=request.args.get("msg"),
+        topbar=auth.render_topbar("groupes"),
     )
 
 

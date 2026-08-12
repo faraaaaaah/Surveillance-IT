@@ -23,6 +23,7 @@ from flask import Blueprint, request, render_template_string
 from flask_login import current_user
 
 import historique
+import auth
 from auth import admin_required
 
 CHEMIN_DB = os.path.join(historique.DOSSIER_DATA, "auth.db")
@@ -111,38 +112,46 @@ audit_bp = Blueprint("audit", __name__)
 
 _PAGE = """
 <!doctype html><html lang="fr"><head><meta charset="utf-8">
-<title>Journal d'audit</title>
+<title>Journal d'audit - SENTINEL</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
 <style>
-  body{font-family:system-ui,sans-serif;background:#0f1115;color:#e6e6e6;padding:2rem;max-width:1000px;margin:0 auto}
-  a{color:#3b82f6}
-  table{width:100%;border-collapse:collapse;margin-top:1rem;font-size:.88rem}
-  th,td{padding:.5rem .6rem;border-bottom:1px solid #2a2d34;text-align:left;vertical-align:top}
-  th{color:#9aa0aa;font-weight:600;font-size:.8rem;text-transform:uppercase}
-  .action{padding:.15rem .5rem;border-radius:4px;background:#1a1d24;font-family:monospace;font-size:.8rem}
-  .acteur{color:#58a6ff;font-weight:600}
-  .details{color:#9aa0aa}
-  .vide{color:#9aa0aa;margin-top:1rem}
+""" + auth.TOKENS_CSS + """
+  .action-tag{padding:2px 8px; border-radius:5px; background:var(--panel2); border:1px solid var(--border);
+              font-family:monospace; font-size:12px;}
+  .acteur{color:var(--accent); font-weight:600;}
+  .details-cell{color:var(--muted);}
 </style></head><body>
-<p><a href="{{ url_for('accueil') }}">&larr; Retour au dashboard</a></p>
-<h1>Journal d'audit</h1>
-<p class="details">Les {{ lignes|length }} dernieres actions d'administration (lecture seule).</p>
+<script>(function(){ if(localStorage.getItem('sentinel-theme') === 'light'){ document.body.classList.add('light'); } })();</script>
 
-{% if lignes %}
-<table>
-<tr><th>Date</th><th>Qui</th><th>Action</th><th>Cible</th><th>Details</th></tr>
-{% for l in lignes %}
-<tr>
-  <td>{{ l.horodatage }}</td>
-  <td class="acteur">{{ l.acteur }}</td>
-  <td><span class="action">{{ l.action }}</span></td>
-  <td>{{ l.cible or '' }}</td>
-  <td class="details">{{ l.details or '' }}</td>
-</tr>
-{% endfor %}
-</table>
-{% else %}
-<p class="vide">Aucune action enregistree pour le moment.</p>
-{% endif %}
+""" + "{{ topbar|safe }}" + """
+
+<main class="contenu">
+  <div class="page-entete">
+    <h1>📜 Journal d'audit</h1>
+    <p>Les {{ lignes|length }} dernieres actions d'administration (lecture seule).</p>
+  </div>
+
+  <div class="carte">
+    {% if lignes %}
+    <table class="table-pro">
+      <tr><th>Date</th><th>Qui</th><th>Action</th><th>Cible</th><th>Details</th></tr>
+      {% for l in lignes %}
+      <tr>
+        <td>{{ l.horodatage }}</td>
+        <td class="acteur">{{ l.acteur }}</td>
+        <td><span class="action-tag">{{ l.action }}</span></td>
+        <td>{{ l.cible or '' }}</td>
+        <td class="details-cell">{{ l.details or '' }}</td>
+      </tr>
+      {% endfor %}
+    </table>
+    {% else %}
+    <div class="vide-etat">Aucune action enregistree pour le moment.</div>
+    {% endif %}
+  </div>
+</main>
+
+<script>""" + auth.JS_TEMA_ET_MENU + """</script>
 </body></html>
 """
 
@@ -150,4 +159,4 @@ _PAGE = """
 @audit_bp.route("/admin/audit")
 @admin_required
 def page_audit():
-    return render_template_string(_PAGE, lignes=lister())
+    return render_template_string(_PAGE, lignes=lister(), topbar=auth.render_topbar("audit"))
