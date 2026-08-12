@@ -1835,6 +1835,9 @@ _PAGE = """
     📊 <strong>Fiabilité mesurée sur 30 jours : {{ fiabilite_globale.fiabilite_pct }}%</strong>
     des alertes précédentes se sont confirmées
     ({{ fiabilite_globale.nb_confirmees }} confirmées / {{ fiabilite_globale.nb_fausses_alertes }} fausses alertes).
+    {% if fiabilite_globale.nb_annulees %}
+    {{ fiabilite_globale.nb_annulees }} autre(s) prévision(s) : la tendance est revenue à la normale d'elle-même avant l'échéance — ni une réussite, ni une erreur du modèle.
+    {% endif %}
     {% if fiabilite_globale.delai_moyen_anticipation_min %}
     Anticipation moyenne quand l'alerte était juste : {{ fiabilite_globale.delai_moyen_anticipation_min|round(0)|int }} min.
     {% endif %}
@@ -1907,6 +1910,9 @@ _PAGE = """
       <div style="margin-top: 8px; font-size: 12px; color: var(--muted);">
         ✅ Fiabilité historique pour ce serveur : {{ p.fiabilite.fiabilite_pct }}%
         ({{ p.fiabilite.nb_confirmees }} confirmées / {{ p.fiabilite.nb_fausses_alertes }} fausses alertes sur 30 jours)
+        {% if p.fiabilite.nb_annulees %}
+        — {{ p.fiabilite.nb_annulees }} tendance(s) résorbée(s) d'elle-même
+        {% endif %}
       </div>
       {% endif %}
     </div>
