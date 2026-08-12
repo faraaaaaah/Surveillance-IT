@@ -1802,10 +1802,8 @@ _PAGE = """
 <main class="contenu">
   <div class="page-entete">
     <h1>🔮 Provisionnement ML</h1>
-    <p>Prédictions avancées basées sur un ensemble de modèles (XGBoost + LSTM + Prophet)</p>
+    <p>Le système analyse en continu vos serveurs pour anticiper les problèmes avant qu'ils n'arrivent.</p>
     <div style="margin-top: 8px;">
-      <span class="badge badge-low">Modèles entraînés</span>
-      <span class="badge badge-moderate">Auto-adaptatif</span>
       <span class="badge badge-high">{{ stats.active_predictions|default(0) }} prévisions actives</span>
       {% if openshift_mode %}
       <span class="openshift-badge">☁️ OpenShift AI</span>
@@ -1826,10 +1824,6 @@ _PAGE = """
     <div class="status-item">
       <div class="status-value">{{ "%.1f"|format(stats.avg_confidence|default(0)*100) }}%</div>
       <div class="status-label">Confiance moyenne</div>
-    </div>
-    <div class="status-item">
-      <div class="status-value">{{ stats.features_importance|default(0) }}</div>
-      <div class="status-label">Features analysées</div>
     </div>
   </div>
 
@@ -1924,7 +1918,7 @@ _PAGE = """
       <div style="font-size: 48px; margin-bottom: 16px;">🔮</div>
       <h3 style="color: var(--muted);">Aucune prévision active</h3>
       <p style="color: var(--muted); font-size: 14px;">
-        Les modèles ML analysent en continu les tendances de vos serveurs.
+        Le système analyse en continu les tendances de vos serveurs.
         Des prévisions apparaîtront automatiquement lorsqu'une anomalie est probable.
       </p>
     </div>
@@ -1979,7 +1973,6 @@ def page_provisionnement():
         'total_servers': len(autorisees),
         'active_predictions': 0,
         'avg_confidence': 0,
-        'features_importance': 0,
         'performance': {}
     }
     
@@ -1996,8 +1989,6 @@ def page_provisionnement():
         status = integrator.health_check()
         if status.get('performance'):
             stats['performance'] = status['performance']
-        if status.get('feature_importance'):
-            stats['features_importance'] = max(stats['features_importance'], len(status.get('feature_importance', {})))
     
     stats['active_predictions'] = sum(1 for p in all_previsions if p['niveau_cible'] in ('warning', 'critique'))
     if all_previsions:
