@@ -175,6 +175,24 @@ class ProductionConfig:
         # generer_previsions(). Configurable pour ajuster la sensibilité
         # sans avoir à modifier le code / rebuild.
         cls.PREVISION_MIN_PROBABILITE = float(cls.get_env("PREVISION_MIN_PROBABILITE", "30"))
+
+        # === FENÊTRE DE MAINTENANCE PRÉVENTIVE ===
+        # Créneau quotidien (heure locale, "HH:MM-HH:MM") où une
+        # intervention a le moins d'impact (trafic faible). Surchargeable
+        # par serveur via MAINTENANCE_WINDOW_<NOM_SERVEUR> (ex :
+        # MAINTENANCE_WINDOW_PC_FARAH="01:00-04:00"), sinon la valeur par
+        # défaut ci-dessous s'applique à tous les serveurs.
+        cls.MAINTENANCE_WINDOW_DEFAULT = cls.get_env("MAINTENANCE_WINDOW_DEFAULT", "02:00-05:00")
+
+        # === TICKETING ===
+        # URL de webhook optionnelle (Jira/GLPI/ServiceNow/...) recevant un
+        # POST JSON à chaque ticket créé depuis une prévision. Si absente,
+        # on retombe sur une notification email aux responsables.
+        cls.TICKET_WEBHOOK_URL = cls.get_env("TICKET_WEBHOOK_URL", "")
+
+        # === CORRÉLATION ENTRE SERVEURS ===
+        cls.CORRELATION_SEUIL = float(cls.get_env("CORRELATION_SEUIL", "0.75"))
+        cls.CORRELATION_FENETRE_MINUTES = int(cls.get_env("CORRELATION_FENETRE_MINUTES", "60"))
         
         # === XGBoost ===
         cls.XGB_LEARNING_RATE = float(cls.get_env("XGB_LEARNING_RATE", "0.1"))
@@ -1534,6 +1552,186 @@ def _metrics_predites_display(metrics_predites: dict, metrique_prioritaire: str 
     ]
 
 
+def _fenetre_maintenance_serveur(serveur: str) -> Tuple[int, int]:
+    """Renvoie (heure_debut, heure_fin) en heures locales (0-23) de la
+    fenêtre de maintenance connue pour ce serveur. Configurable par
+    serveur via MAINTENANCE_WINDOW_<NOM_SERVEUR> (ex: '01:00-04:00'),
+    sinon on retombe sur MAINTENANCE_WINDOW_DEFAULT (voir ProductionConfig)."""
+    cle_env = "MAINTENANCE_WINDOW_" + "".join(
+        c if c.isalnum() else "_" for c in serveur.upper()
+    )
+    brute = ProductionConfig.get_env(cle_env, Config.MAINTENANCE_WINDOW_DEFAULT)
+    try:
+        debut_str, fin_str = brute.split("-")
+        return int(debut_str.split(":")[0]), int(fin_str.split(":")[0])
+    except Exception:
+        return 2, 5  # repli raisonnable : nuit, trafic minimal
+
+
+def _prochaine_fenetre_maintenance(depuis: datetime, heure_debut: int, heure_fin: int) -> Tuple[datetime, datetime]:
+    """Calcule le prochain créneau [début, fin] de la fenêtre de
+    maintenance quotidienne à partir de `depuis`. Si `depuis` tombe déjà
+    dans la fenêtre d'aujourd'hui, renvoie ce qu'il en reste ; sinon
+    renvoie la fenêtre du jour suivant."""
+    debut = depuis.replace(hour=heure_debut, minute=0, second=0, microsecond=0)
+    fin = depuis.replace(hour=heure_fin, minute=0, second=0, microsecond=0)
+    if fin <= depuis:
+        debut += timedelta(days=1)
+        fin += timedelta(days=1)
+    elif debut < depuis < fin:
+        debut = depuis
+    return debut, fin
+
+
+def _suggestion_maintenance(p: Dict) -> Optional[Dict]:
+    """Transforme une prévision fiable en action concrète et datée : 'voici
+    le créneau où intervenir', pas seulement 'il y a un risque'.
+
+    Les 3 conditions doivent être réunies :
+      - modèle fiable : confiance du modèle >= CONFIDENCE_THRESHOLD ET
+        fiabilité historique du serveur >= 60% (si déjà mesurée — un
+        serveur tout juste mis en surveillance n'a pas encore d'historique,
+        on ne le bloque pas pour autant)
+      - tendance claire : niveau 'warning' ou 'critique' (jamais
+        'incertain' ni 'surveillance', qui ne sont pas des risques confirmés)
+      - une fenêtre de maintenance connue existe pour ce serveur
+
+    Ne suggère un créneau que s'il tombe AVANT l'échéance estimée : proposer
+    un créneau trop tardif serait pire que de ne rien proposer."""
+    if p.get('niveau_cible') not in ('warning', 'critique'):
+        return None
+    if _num(p.get('confiance')) < Config.CONFIDENCE_THRESHOLD:
+        return None
+    fiabilite_pct = (p.get('fiabilite') or {}).get('fiabilite_pct')
+    if fiabilite_pct is not None and fiabilite_pct < 60:
+        return None
+
+    temps_estime_h = _num(p.get('temps_estime'))
+    if temps_estime_h <= 0:
+        return None
+
+    maintenant = historique.maintenant_local()
+    echeance = maintenant + timedelta(hours=temps_estime_h)
+
+    heure_debut, heure_fin = _fenetre_maintenance_serveur(p['serveur'])
+    creneau_debut, creneau_fin = _prochaine_fenetre_maintenance(maintenant, heure_debut, heure_fin)
+
+    if creneau_debut >= echeance:
+        return {
+            'disponible': False,
+            'echeance': echeance.strftime("%Y-%m-%d %H:%M"),
+            'message': (
+                f"⏱️ Le créneau de maintenance habituel ({heure_debut:02d}h-{heure_fin:02d}h) tombe "
+                f"APRÈS l'échéance estimée ({echeance.strftime('%d/%m %H:%M')}). "
+                f"Une action est nécessaire avant, pas d'attente possible jusqu'au prochain créneau."
+            ),
+        }
+
+    marge_min = max(0, int((echeance - creneau_fin).total_seconds() / 60))
+    return {
+        'disponible': True,
+        'debut': creneau_debut.strftime("%Y-%m-%d %H:%M"),
+        'fin': creneau_fin.strftime("%Y-%m-%d %H:%M"),
+        'debut_label': creneau_debut.strftime("%A %d/%m à %Hh%M").capitalize(),
+        'fin_label': creneau_fin.strftime("%Hh%M"),
+        'echeance': echeance.strftime("%Y-%m-%d %H:%M"),
+        'marge_min': marge_min,
+        'message': (
+            f"🛠️ Fenêtre de maintenance suggérée : {creneau_debut.strftime('%A %d/%m %Hh%M').capitalize()} "
+            f"→ {creneau_fin.strftime('%Hh%M')}, soit {marge_min // 60}h{marge_min % 60:02d} d'avance "
+            f"sur l'échéance estimée ({echeance.strftime('%d/%m %H:%M')})."
+        ),
+    }
+
+
+def _donnees_ticket(p: Dict, suggestion: Optional[Dict]) -> Dict:
+    """Construit le contenu pré-rempli d'un ticket de maintenance à partir
+    d'une prévision : créer le ticket ne demande plus qu'un clic, sans
+    ressaisir manuellement probabilité/confiance/métrique."""
+    metrique_label = p.get('metrique_critique_label', '')
+    lignes = [
+        f"Serveur : {p['serveur']}",
+        f"Métrique à risque : {metrique_label}",
+        f"Niveau : {p.get('niveau_label', '')}",
+        f"Probabilité : {round(_num(p.get('probabilite')))}%",
+        f"Confiance du modèle : {round(_num(p.get('confiance')) * 100)}%",
+        f"Échéance estimée : {(suggestion or {}).get('echeance', '')}",
+    ]
+    if p.get('recommandation'):
+        lignes.append(f"Action recommandée : {p['recommandation']}")
+    if suggestion and suggestion.get('disponible'):
+        lignes.append(f"Créneau proposé : {suggestion['debut_label']} → {suggestion['fin_label']}")
+
+    return {
+        'titre': f"Maintenance préventive — {p['serveur']} ({metrique_label})",
+        'description': "\n".join(lignes),
+        'serveur': p['serveur'],
+        'metrique': metrique_label,
+        'priorite': 'haute' if p.get('niveau_cible') == 'critique' else 'normale',
+        'creneau_debut': (suggestion or {}).get('debut'),
+        'creneau_fin': (suggestion or {}).get('fin'),
+    }
+
+
+def _serie_alignee(mesures: list, metrique: str) -> list:
+    """Suite triée par horodatage des valeurs d'une métrique (la plus
+    récente en dernier), pour comparer deux serveurs sur une même fenêtre."""
+    triees = sorted(mesures, key=lambda m: m.get('horodatage', ''))
+    return [_num(m.get(metrique, 0)) for m in triees if metrique in m]
+
+
+def detecter_correlations_serveurs(previsions: List[Dict]) -> List[Dict]:
+    """Détecte les paires de serveurs qui DÉRIVENT ENSEMBLE sur la même
+    métrique, dans la même fenêtre de temps — souvent le signe d'une cause
+    commune (panne réseau, dépendance applicative partagée) plutôt que deux
+    incidents indépendants à traiter séparément dans l'UI.
+
+    Ne compare que les serveurs actuellement sous tension (pas 'sain'), pour
+    éviter des corrélations sans intérêt sur du bruit constant (deux
+    serveurs stables à 5% de CPU sont toujours "corrélés" sans que ça
+    signifie quoi que ce soit)."""
+    candidats = [p for p in previsions if p.get('niveau_cible') in ('warning', 'critique', 'surveillance')]
+    resultats = []
+    vus = set()
+
+    for i, p1 in enumerate(candidats):
+        for p2 in candidats[i + 1:]:
+            if p1['serveur'] == p2['serveur']:
+                continue
+            metriques_communes = set(p1.get('valeurs_metriques', {})) & set(p2.get('valeurs_metriques', {}))
+            for metrique in metriques_communes:
+                paire = tuple(sorted([p1['serveur'], p2['serveur']]) + [metrique])
+                if paire in vus:
+                    continue
+
+                heures = Config.CORRELATION_FENETRE_MINUTES / 60
+                serie1 = _serie_alignee(historique.recuperer_mesures(p1['serveur'], heures=heures), metrique)
+                serie2 = _serie_alignee(historique.recuperer_mesures(p2['serveur'], heures=heures), metrique)
+                n = min(len(serie1), len(serie2))
+                if n < 8:
+                    continue
+                serie1, serie2 = np.array(serie1[-n:]), np.array(serie2[-n:])
+                if serie1.std() < 1e-6 or serie2.std() < 1e-6:
+                    continue
+
+                coeff = float(np.corrcoef(serie1, serie2)[0, 1])
+                if coeff >= Config.CORRELATION_SEUIL:
+                    vus.add(paire)
+                    resultats.append({
+                        'serveurs': [p1['serveur'], p2['serveur']],
+                        'metrique': metrique,
+                        'metrique_label': _label_feature(metrique),
+                        'coefficient': round(coeff, 2),
+                        'message': (
+                            f"🔗 {p1['serveur']} et {p2['serveur']} dérivent ensemble sur "
+                            f"{_label_feature(metrique)} (corrélation {coeff:.0%}) : cause commune "
+                            f"probable (réseau, dépendance partagée) plutôt que deux incidents "
+                            f"indépendants à traiter séparément."
+                        ),
+                    })
+    return resultats
+
+
 def apercu_serveur(serveur: str) -> Dict:
     """Statut ML toujours renvoyé pour un serveur, utilisé uniquement pour
     l'affichage de la page /provisionnement (contrairement à
@@ -1570,6 +1768,10 @@ def apercu_serveur(serveur: str) -> Dict:
         'valeurs_metriques': valeurs_metriques,
         'risque_combine': risque_combine,
         'fiabilite': fiabilite,
+        'metrique_critique': None,
+        'maintenance_suggestion': None,
+        'ticket_data': None,
+        'correlations': [],
     }
 
     if len(recent_measures) < 10:
@@ -1615,7 +1817,13 @@ def apercu_serveur(serveur: str) -> Dict:
                     Config.THRESHOLDS.get(metrique, 90), niveau,
                 ),
                 'recommandation': _recommandation_action(metrique, niveau),
+                'metrique_critique': metrique,
             })
+            base['maintenance_suggestion'] = _suggestion_maintenance(base)
+            base['ticket_data'] = (
+                _donnees_ticket(base, base['maintenance_suggestion'])
+                if base['maintenance_suggestion'] else None
+            )
             return base
         niveau = 'sain'
         base.update({
@@ -1677,7 +1885,13 @@ def apercu_serveur(serveur: str) -> Dict:
             Config.THRESHOLDS.get(metrique_critique, 90), niveau,
         ),
         'recommandation': _recommandation_action(metrique_critique, niveau),
+        'metrique_critique': metrique_critique,
     })
+    base['maintenance_suggestion'] = _suggestion_maintenance(base)
+    base['ticket_data'] = (
+        _donnees_ticket(base, base['maintenance_suggestion'])
+        if base['maintenance_suggestion'] else None
+    )
     return base
 
 
@@ -2094,6 +2308,37 @@ _PAGE = """
   </div>
   {% endif %}
 
+  <!-- Corrélation entre serveurs : cause commune probable -->
+  {% if correlations %}
+  <div style="margin: 16px 0;">
+    {% for c in correlations %}
+    <div style="padding: 14px 16px; background: rgba(124,58,237,0.10); border: 1px solid rgba(124,58,237,0.35);
+                border-radius: 8px; font-size: 13.5px; margin-bottom: 8px;">
+      {{ c.message }}
+    </div>
+    {% endfor %}
+  </div>
+  {% endif %}
+
+  <!-- Chatbot sur les prévisions -->
+  <div class="carte" style="margin: 16px 0;">
+    <h3 style="margin: 0 0 10px; font-size: 14px;">💬 Poser une question sur vos prévisions</h3>
+    <div style="display:flex; gap:8px; flex-wrap:wrap; align-items:center;">
+      <select id="chat-serveur" style="padding:8px; border-radius:6px; border:1px solid var(--border); background:var(--panel2); color:var(--text);">
+        <option value="">Tous les serveurs</option>
+        {% for s in serveurs_disponibles %}
+        <option value="{{ s }}">{{ s }}</option>
+        {% endfor %}
+      </select>
+      <input id="chat-question" type="text" placeholder="Ex : Pourquoi PC-Farah est à 8% de risque ?"
+             style="flex:1; min-width:220px; padding:8px 10px; border-radius:6px; border:1px solid var(--border); background:var(--panel2); color:var(--text);">
+      <button id="chat-envoyer" onclick="envoyerQuestionPrevisions()"
+              style="padding:8px 16px; border-radius:6px; border:none; background:#3b82f6; color:white; cursor:pointer;">Demander</button>
+    </div>
+    <div id="chat-reponse" style="margin-top:10px; font-size:13.5px; color: var(--text); display:none;
+                                   padding:12px; background: var(--panel2); border-radius:8px;"></div>
+  </div>
+
   <!-- Prévisions -->
   {% if previsions %}
 
@@ -2129,6 +2374,11 @@ _PAGE = """
           <h3 style="margin: 0;">{{ p.serveur }}</h3>
           <div style="font-size: 12px; color: var(--muted);">
             {{ p.niveau_emoji }} {{ p.niveau_label }}
+            {% if p.correlations %}
+            <span class="badge" style="background: rgba(124,58,237,0.18); color:#7c3aed;" title="{{ p.correlations[0].message }}">
+              🔗 corrélé
+            </span>
+            {% endif %}
           </div>
         </div>
         <div>
@@ -2165,7 +2415,21 @@ _PAGE = """
       </div>
 
       {% if p.chart_svg %}
-      {{ p.chart_svg|safe }}
+      <div id="chart-container-{{ loop.index }}">{{ p.chart_svg|safe }}</div>
+      {% endif %}
+
+      {% if p.metrique_critique and p.niveau_cible in ('warning', 'critique', 'surveillance') %}
+      <div style="margin-top: 6px; padding: 10px 12px; background: var(--panel2); border-radius: 8px; font-size: 12.5px;">
+        <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:6px;">
+          <span>🔮 Simuler : et si la tendance changeait ?</span>
+          <span id="sim-facteur-{{ loop.index }}" style="font-weight:600;">1.0×</span>
+        </div>
+        <input type="range" min="0.25" max="3" step="0.25" value="1"
+               id="sim-slider-{{ loop.index }}"
+               oninput="simulerTendance('{{ p.serveur }}', '{{ p.metrique_critique }}', {{ loop.index }})"
+               style="width:100%;">
+        <div id="sim-message-{{ loop.index }}" style="margin-top:6px; color: var(--muted);"></div>
+      </div>
       {% endif %}
 
       {% if p.risque_combine %}
@@ -2189,6 +2453,22 @@ _PAGE = """
       {% if p.recommandation %}
       <div style="margin-top: 8px; padding: 12px; background: rgba(59,130,246,0.08); border-left: 3px solid #3b82f6; border-radius: 6px; font-size: 13px;">
         🛠️ <strong>À faire :</strong> {{ p.recommandation }}
+      </div>
+      {% endif %}
+
+      {% if p.maintenance_suggestion %}
+      <div style="margin-top: 8px; padding: 12px; background: {{ 'rgba(34,197,94,0.10)' if p.maintenance_suggestion.disponible else 'rgba(239,68,68,0.10)' }};
+                  border-left: 3px solid {{ '#22c55e' if p.maintenance_suggestion.disponible else '#ef4444' }};
+                  border-radius: 6px; font-size: 13px;">
+        {{ p.maintenance_suggestion.message }}
+        {% if p.maintenance_suggestion.disponible and p.ticket_data %}
+        <div style="margin-top: 8px;">
+          <button onclick='creerTicket({{ p.ticket_data|tojson }}, this)'
+                  style="padding:6px 14px; border-radius:6px; border:none; background:#22c55e; color:white; cursor:pointer; font-size:12.5px;">
+            🎫 Créer un ticket pour ce créneau
+          </button>
+        </div>
+        {% endif %}
       </div>
       {% endif %}
 
@@ -2217,7 +2497,87 @@ _PAGE = """
   {% endif %}
 </main>
 
-<script>""" + JS_TEMA_ET_MENU + """</script>
+<script>""" + JS_TEMA_ET_MENU + """
+
+// --- Simulateur "et si" sur la tendance -------------------------------
+async function simulerTendance(serveur, metrique, index) {
+  const slider = document.getElementById('sim-slider-' + index);
+  const facteurLabel = document.getElementById('sim-facteur-' + index);
+  const message = document.getElementById('sim-message-' + index);
+  const chartContainer = document.getElementById('chart-container-' + index);
+  const multiplicateur = parseFloat(slider.value);
+  facteurLabel.textContent = multiplicateur.toFixed(2) + '×';
+  message.textContent = 'Calcul en cours...';
+
+  try {
+    const url = '/provisionnement/api/simuler?serveur=' + encodeURIComponent(serveur) +
+                '&metrique=' + encodeURIComponent(metrique) +
+                '&multiplicateur=' + multiplicateur;
+    const resp = await fetch(url);
+    const data = await resp.json();
+    if (data.error) {
+      message.textContent = data.error;
+      return;
+    }
+    message.textContent = data.message;
+    if (data.chart_svg && chartContainer) {
+      chartContainer.innerHTML = data.chart_svg;
+    }
+  } catch (e) {
+    message.textContent = "Erreur lors de la simulation.";
+  }
+}
+
+// --- Création de ticket depuis une prévision ---------------------------
+async function creerTicket(donneesTicket, boutonEl) {
+  boutonEl.disabled = true;
+  boutonEl.textContent = 'Création...';
+  try {
+    const resp = await fetch('/provisionnement/api/creer-ticket', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(donneesTicket),
+    });
+    const data = await resp.json();
+    if (data.ok) {
+      boutonEl.textContent = '✅ Ticket créé';
+    } else {
+      boutonEl.textContent = '⚠️ Échec — réessayer';
+      boutonEl.disabled = false;
+    }
+  } catch (e) {
+    boutonEl.textContent = '⚠️ Échec — réessayer';
+    boutonEl.disabled = false;
+  }
+}
+
+// --- Chatbot sur les prévisions -----------------------------------------
+async function envoyerQuestionPrevisions() {
+  const question = document.getElementById('chat-question').value.trim();
+  const serveur = document.getElementById('chat-serveur').value;
+  const zoneReponse = document.getElementById('chat-reponse');
+  const bouton = document.getElementById('chat-envoyer');
+  if (!question) return;
+
+  bouton.disabled = true;
+  zoneReponse.style.display = 'block';
+  zoneReponse.textContent = '💭 Réflexion en cours...';
+
+  try {
+    const resp = await fetch('/provisionnement/api/chat', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ question: question, serveur: serveur || null }),
+    });
+    const data = await resp.json();
+    zoneReponse.textContent = data.error ? ('⚠️ ' + data.error) : data.reponse;
+  } catch (e) {
+    zoneReponse.textContent = "⚠️ Impossible de contacter l'assistant pour le moment.";
+  } finally {
+    bouton.disabled = false;
+  }
+}
+</script>
 </body></html>
 """
 
@@ -2276,6 +2636,18 @@ def page_provisionnement():
 
     fiabilite_globale = historique.statistiques_fiabilite_previsions(jours=30)
 
+    # Détection de corrélation entre serveurs : regroupe les prévisions
+    # concernées par une dérive partagée, pour que l'UI affiche "cause
+    # commune probable" plutôt que 2 cartes traitées comme 2 problèmes
+    # sans lien apparent.
+    correlations = detecter_correlations_serveurs(all_previsions)
+    correles_par_serveur = {}
+    for c in correlations:
+        for s in c['serveurs']:
+            correles_par_serveur.setdefault(s, []).append(c)
+    for apercu in all_previsions:
+        apercu['correlations'] = correles_par_serveur.get(apercu['serveur'], [])
+
     # Vue d'ensemble comparative : une ligne par serveur, une colonne par
     # métrique, basée sur les valeurs déjà calculées ci-dessus (pas de
     # nouvelle requête). Donne en un coup d'œil ce qu'un tableau de
@@ -2298,6 +2670,8 @@ def page_provisionnement():
         fiabilite_globale=fiabilite_globale,
         vue_ensemble=vue_ensemble,
         colonnes_metriques=colonnes_metriques,
+        correlations=correlations,
+        serveurs_disponibles=sorted(autorisees),
         openshift_mode=Config.OPENSHIFT_MODE,
         topbar=render_topbar("provisionnement")
     )
@@ -2330,6 +2704,147 @@ def api_health():
     """API de santé"""
     integrator = get_integrator()
     return jsonify(integrator.health_check())
+
+
+@provisionnement_bp.route("/provisionnement/api/simuler")
+@login_required
+def api_simuler():
+    """Simulateur "et si" : recalcule le temps estimé avant anomalie si la
+    tendance actuelle accélérait ou ralentissait d'un facteur choisi par
+    l'utilisateur. Réutilise directement calculer_tendance() (régression
+    déjà en place pour les prévisions de secours) — aucun nouveau modèle à
+    entraîner, juste une re-projection de la pente mesurée."""
+    import assignations
+    serveur = request.args.get('serveur', '')
+    metrique = request.args.get('metrique', '')
+
+    autorisees = assignations.machines_autorisees(current_user)
+    if autorisees is not None and serveur not in autorisees:
+        return jsonify({'error': 'Serveur non autorisé'}), 403
+
+    try:
+        multiplicateur = float(request.args.get('multiplicateur', '1'))
+    except ValueError:
+        return jsonify({'error': 'Multiplicateur invalide'}), 400
+    multiplicateur = max(0.1, min(multiplicateur, 5.0))
+
+    if not serveur or metrique not in Config.METRICS:
+        return jsonify({'error': 'Paramètres invalides'}), 400
+
+    tendance = calculer_tendance(serveur, metrique, fenetre_minutes=30)
+    if not tendance:
+        return jsonify({'error': "Pas assez de données récentes sur ce serveur pour simuler."}), 400
+
+    seuil = Config.THRESHOLDS.get(metrique, 90)
+    valeur_actuelle = _num(tendance['valeur_actuelle'])
+    pente = _num(tendance['pente_par_heure']) * multiplicateur
+
+    if pente <= 0:
+        return jsonify({
+            'temps_estime': None,
+            'multiplicateur': multiplicateur,
+            'message': "À cette vitesse, le seuil ne serait jamais atteint (tendance nulle ou négative).",
+        })
+
+    heures = 0.0 if valeur_actuelle >= seuil else (seuil - valeur_actuelle) / pente
+    heures = min(heures, Config.PREDICTION_HORIZON * 5)  # borne d'affichage raisonnable
+    echeance = (historique.maintenant_local() + timedelta(hours=heures)).strftime("%Y-%m-%d %H:%M")
+
+    recent_measures = historique.recuperer_mesures(serveur, heures=2)
+    historique_metrique = [_num(m.get(metrique, 0)) for m in recent_measures]
+    niveau = 'critique' if heures <= 4 else 'warning' if heures <= Config.PREDICTION_HORIZON else 'surveillance'
+    valeur_predite = min(seuil * 1.1, valeur_actuelle + pente * min(heures, Config.PREDICTION_HORIZON))
+    chart_svg = _graphique_tendance_svg(historique_metrique, valeur_predite, heures, seuil, niveau)
+
+    return jsonify({
+        'temps_estime': round(heures, 1),
+        'echeance': echeance,
+        'multiplicateur': multiplicateur,
+        'chart_svg': chart_svg,
+        'message': (
+            f"À {multiplicateur:.2f}× la tendance actuelle, le seuil ({seuil:.0f}%) serait atteint "
+            f"dans environ {heures:.1f}h (~{echeance})."
+        ),
+    })
+
+
+@provisionnement_bp.route("/provisionnement/api/creer-ticket", methods=["POST"])
+@login_required
+def api_creer_ticket():
+    """Crée un ticket de maintenance pré-rempli à partir d'une prévision.
+    Envoie vers TICKET_WEBHOOK_URL si configuré (webhook Jira/GLPI/
+    ServiceNow/...), sinon notifie les responsables par email — jamais
+    d'erreur bloquante si le système de ticketing externe est indisponible,
+    même philosophie défensive que les canaux d'alerte de notifier.py."""
+    import assignations
+
+    data = request.get_json(force=True, silent=True) or {}
+    if not all(data.get(k) for k in ('titre', 'description', 'serveur')):
+        return jsonify({'error': 'Données de ticket incomplètes'}), 400
+
+    autorisees = assignations.machines_autorisees(current_user)
+    if autorisees is not None and data['serveur'] not in autorisees:
+        return jsonify({'error': 'Serveur non autorisé'}), 403
+
+    ticket = {
+        'titre': data['titre'],
+        'description': data['description'],
+        'serveur': data['serveur'],
+        'metrique': data.get('metrique', ''),
+        'priorite': data.get('priorite', 'normale'),
+        'creneau_debut': data.get('creneau_debut'),
+        'creneau_fin': data.get('creneau_fin'),
+        'cree_par': getattr(current_user, 'email', None) or getattr(current_user, 'username', 'inconnu'),
+        'cree_le': historique.maintenant_local().strftime("%Y-%m-%d %H:%M:%S"),
+    }
+
+    envoye_webhook = False
+    if Config.TICKET_WEBHOOK_URL and REQUESTS_AVAILABLE:
+        try:
+            resp = requests.post(Config.TICKET_WEBHOOK_URL, json=ticket, timeout=5)
+            envoye_webhook = resp.status_code < 300
+        except Exception as e:
+            Logger.warning(f"Échec envoi ticket vers webhook : {e}")
+
+    if not envoye_webhook:
+        try:
+            import notifier
+            notifier.envoyer_email_generique(
+                sujet=f"🎫 Nouveau ticket de maintenance — {ticket['serveur']}",
+                corps=ticket['description'] + f"\n\nCréé par : {ticket['cree_par']} le {ticket['cree_le']}",
+            )
+        except Exception as e:
+            Logger.warning(f"Échec notification du ticket par email : {e}")
+
+    Logger.info(f"🎫 Ticket de maintenance créé pour {ticket['serveur']} : {ticket['titre']}")
+    return jsonify({'ok': True, 'webhook': envoye_webhook, 'ticket': ticket})
+
+
+@provisionnement_bp.route("/provisionnement/api/chat", methods=["POST"])
+@login_required
+def api_chat_previsions():
+    """Questions en langage naturel sur les prévisions ML actuelles.
+    Réutilise chatbot.py (déjà utilisé pour expliquer les anomalies du
+    module 3) plutôt que d'ajouter un nouveau module séparé — voir
+    chatbot.repondre_question_provisionnement()."""
+    import assignations
+    import chatbot
+
+    data = request.get_json(force=True, silent=True) or {}
+    question = (data.get('question') or '').strip()
+    if not question:
+        return jsonify({'error': 'Question vide'}), 400
+
+    serveur = data.get('serveur') or None
+    autorisees = assignations.machines_autorisees(current_user)
+    autorisees = [m for m in autorisees if m != 'local'] if autorisees is not None else None
+    if serveur and autorisees is not None and serveur not in autorisees:
+        return jsonify({'error': 'Serveur non autorisé'}), 403
+
+    reponse = chatbot.repondre_question_provisionnement(
+        question, serveur=serveur, serveurs_disponibles=autorisees
+    )
+    return jsonify({'reponse': reponse})
 
 # ============================================================================
 # INITIALISATION

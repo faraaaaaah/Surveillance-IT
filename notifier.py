@@ -25,6 +25,8 @@ import smtplib
 import threading
 import requests
 from email.mime.text import MIMEText
+from email.mime.multipart import MIMEMultipart
+from email.mime.application import MIMEApplication
 from datetime import datetime, timedelta
 from historique import metrique_est_normale, a_une_metrique
 import destinataires
@@ -299,14 +301,21 @@ _dernier_envoi_email = {}   # cle_anomalie -> timestamp du dernier envoi (cooldo
 _email_lock = threading.Lock()
 
 
-def _envoyer_email(sujet: str, corps: str) -> bool:
-    """Envoi SMTP bas niveau. Ne lève JAMAIS d'exception vers l'appelant
-    (même règle que Slack/WhatsApp : un souci email ne doit jamais faire
-    planter le cycle de surveillance). Les identifiants SMTP sont lus
-    DYNAMIQUEMENT depuis parametres.py (regle une fois via la page
-    /admin/parametres-email) a CHAQUE envoi, pas figés au demarrage : un
-    changement de mot de passe depuis le navigateur prend effet
-    immédiatement, sans redemarrer le pod."""
+def _envoyer_email_brut(sujet: str, corps: str, pieces_jointes: list = None) -> bool:
+    """Envoi SMTP bas niveau, avec pièces jointes optionnelles. Ne lève
+    JAMAIS d'exception vers l'appelant (même règle que Slack/WhatsApp : un
+    souci email ne doit jamais faire planter le cycle de surveillance).
+    Les identifiants SMTP sont lus DYNAMIQUEMENT depuis parametres.py
+    (réglé une fois via la page /admin/parametres-email) à CHAQUE envoi,
+    pas figés au démarrage : un changement de mot de passe depuis le
+    navigateur prend effet immédiatement, sans redémarrer le pod.
+
+    `pieces_jointes` (optionnel) : liste de chemins de fichiers à joindre
+    (ex: le PDF du rapport hebdomadaire de fiabilité). Sans pièce jointe,
+    le comportement est identique à l'ancien _envoyer_email() (MIMEText
+    simple) — c'est le SEUL point d'envoi SMTP bas niveau du module,
+    utilisé aussi bien par les alertes d'anomalie que par les emails
+    utilitaires (ticket créé, rapport hebdo)."""
     liste_destinataires = destinataires.emails_actifs()
     if not liste_destinataires:
         return False
@@ -317,18 +326,31 @@ def _envoyer_email(sujet: str, corps: str) -> bool:
         print("⚠️  Aucune configuration email (voir /admin/parametres-email) — envoi ignoré.")
         return False
 
-    msg = MIMEText(corps, "plain", "utf-8")
+    if pieces_jointes:
+        msg = MIMEMultipart()
+        msg.attach(MIMEText(corps, "plain", "utf-8"))
+        for chemin in pieces_jointes:
+            try:
+                with open(chemin, "rb") as f:
+                    piece = MIMEApplication(f.read(), Name=os.path.basename(chemin))
+                piece["Content-Disposition"] = f'attachment; filename="{os.path.basename(chemin)}"'
+                msg.attach(piece)
+            except OSError as e:
+                print(f"⚠️  Impossible de joindre {chemin} à l'email : {e}")
+    else:
+        msg = MIMEText(corps, "plain", "utf-8")
+
     msg["Subject"] = sujet
     msg["From"] = config["utilisateur"]
     msg["To"] = ", ".join(liste_destinataires)
 
     try:
         if config["port"] == 465:
-            with smtplib.SMTP_SSL(config["host"], config["port"], timeout=10) as serveur:
+            with smtplib.SMTP_SSL(config["host"], config["port"], timeout=15) as serveur:
                 serveur.login(config["utilisateur"], config["mot_de_passe"])
                 serveur.sendmail(config["utilisateur"], liste_destinataires, msg.as_string())
         else:
-            with smtplib.SMTP(config["host"], config["port"], timeout=10) as serveur:
+            with smtplib.SMTP(config["host"], config["port"], timeout=15) as serveur:
                 serveur.starttls()
                 serveur.login(config["utilisateur"], config["mot_de_passe"])
                 serveur.sendmail(config["utilisateur"], liste_destinataires, msg.as_string())
@@ -336,6 +358,43 @@ def _envoyer_email(sujet: str, corps: str) -> bool:
     except Exception as e:
         print(f"⚠️  Échec envoi email : {e}")
         return False
+
+
+def _envoyer_email(sujet: str, corps: str) -> bool:
+    """Compatibilité : ancien point d'entrée sans pièce jointe, utilisé par
+    les alertes d'anomalie (envoyer_email_alerte). Délègue à
+    _envoyer_email_brut()."""
+    return _envoyer_email_brut(sujet, corps)
+
+
+def envoyer_email_generique(sujet: str, corps: str, pieces_jointes: list = None) -> bool:
+    """Envoi email 'utilitaire', hors boucle d'alerte d'anomalie (donc sans
+    le cooldown ni le suivi actif/résolu de envoyer_email_alerte) — utilisé
+    par exemple pour notifier la création d'un ticket de maintenance
+    (voir provisionnement.py, /provisionnement/api/creer-ticket) ou tout
+    autre message ponctuel destiné aux mêmes responsables."""
+    return _envoyer_email_brut(sujet, corps, pieces_jointes)
+
+
+def envoyer_rapport_fiabilite_email(chemin_pdf: str) -> bool:
+    """Envoie le rapport hebdomadaire de fiabilité (généré par
+    rapport_pdf.generer_rapport_fiabilite) aux responsables, en pièce
+    jointe. Réutilise l'infra email déjà en place (mêmes destinataires,
+    même configuration SMTP que les alertes) — pas de nouveau canal à
+    maintenir pour ce rapport."""
+    sujet = f"📊 Rapport hebdomadaire de fiabilité — {datetime.now().strftime('%d/%m/%Y')}"
+    corps = (
+        "Le rapport hebdomadaire de fiabilité du système de surveillance est en pièce jointe.\n\n"
+        "Il résume, par serveur : le nombre d'alertes préventives lancées, le taux de fiabilité "
+        "(prévisions confirmées vs fausses alertes vs résorbées seules), et la tendance par "
+        "rapport à la semaine précédente — pas seulement la fenêtre glissante des 30 derniers "
+        "jours affichée sur le dashboard."
+    )
+    if _envoyer_email_brut(sujet, corps, pieces_jointes=[chemin_pdf]):
+        print("📧 Rapport de fiabilité hebdomadaire envoyé par email.")
+        return True
+    print("⚠️  Échec de l'envoi du rapport de fiabilité hebdomadaire par email.")
+    return False
 
 
 def envoyer_email_alerte(m: dict, anomalies: list[str], explication: str,
