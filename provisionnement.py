@@ -165,6 +165,10 @@ class ProductionConfig:
         }
         
         # === CONFIDENCE ===
+        # Seuil de confiance en dessous duquel une prévision n'est PAS
+        # considérée comme fiable : elle n'est ni envoyée en alerte, ni
+        # affichée comme un vrai risque (Vigilance/Critique) sur la page.
+        # Objectif : ne montrer que des prévisions quasi sûres, pas du bruit.
         cls.CONFIDENCE_THRESHOLD = float(cls.get_env("CONFIDENCE_THRESHOLD", "0.6"))
         cls.ANOMALY_PROB_THRESHOLD = float(cls.get_env("ANOMALY_PROB_THRESHOLD", "0.6"))
         # Seuil (en %) en dessous duquel aucune prévision n'est créée dans
@@ -1291,6 +1295,7 @@ NIVEAU_LABELS = {
     'critique': ('🔴', 'Critique'),
     'warning': ('🟠', 'Vigilance'),
     'surveillance': ('🔵', 'À surveiller'),
+    'incertain': ('🔵', 'Signal à confirmer'),
     'sain': ('🟢', 'Sain'),
     'collecte': ('⚪', 'Collecte en cours'),
 }
@@ -1312,9 +1317,19 @@ def generer_previsions(serveur: str) -> List[Dict]:
         # estimation par régression linéaire simple plutôt que de ne
         # rien renvoyer. Moins précis que XGBoost+LSTM+Prophet, mais
         # utilisable dès 10 mesures récentes au lieu de 100.
-        return generer_previsions_simple(serveur)
+        # On ne garde que les prévisions jugées assez fiables pour être
+        # envoyées comme alerte réelle (pas de niveau 'incertain' ici).
+        return [p for p in generer_previsions_simple(serveur) if p['niveau_cible'] != 'incertain']
     
     if prediction.get('probabilite_anomalie', 0) < Config.PREVISION_MIN_PROBABILITE:
+        return []
+
+    # Garde-fou fiabilité : une probabilité d'anomalie élevée ne veut rien
+    # dire si le modèle n'est pas confiant dans son estimation. On ne
+    # remonte une vraie alerte (email/WhatsApp) que si les deux sont réunis :
+    # risque suffisant ET confiance suffisante. Sinon on préfère ne rien dire
+    # plutôt que d'alerter sur du bruit.
+    if _num(prediction.get('confiance', 0)) < Config.CONFIDENCE_THRESHOLD:
         return []
     
     valeurs_actuelles = prediction['valeurs_actuelles']
@@ -1449,6 +1464,7 @@ def apercu_serveur(serveur: str) -> Dict:
         return base
 
     proba = _num(prediction.get('probabilite_anomalie', 0))
+    confiance_brute = _num(prediction.get('confiance'))
     if proba >= 70:
         niveau = 'critique'
     elif proba >= Config.PREVISION_MIN_PROBABILITE:
@@ -1457,6 +1473,13 @@ def apercu_serveur(serveur: str) -> Dict:
         niveau = 'surveillance'
     else:
         niveau = 'sain'
+
+    # Une probabilité élevée avec une confiance trop basse n'est pas une
+    # prévision fiable — on ne veut pas afficher "Vigilance"/"Critique"
+    # (ça a l'air d'un fait certain) quand le modèle n'est en réalité pas
+    # sûr de lui. On déclasse honnêtement plutôt que d'alarmer pour rien.
+    if niveau in ('critique', 'warning') and confiance_brute < Config.CONFIDENCE_THRESHOLD:
+        niveau = 'incertain'
 
     valeurs_actuelles = prediction.get('valeurs_actuelles', {})
     metrics_predites = {
@@ -1505,17 +1528,24 @@ def generer_previsions_simple(serveur: str) -> List[Dict]:
         valeur_actuelle = _num(tendance['valeur_actuelle'])
         confiance = _num(tendance['confiance'])
 
-        # Pas de tendance à la hausse exploitable, ou régression trop
-        # bruitée (r2 faible), ou déjà au-dessus du seuil (ce n'est plus
-        # une prévision mais un incident réel) : rien à signaler ici.
-        if pente <= 0 or confiance < 0.3 or valeur_actuelle >= seuil:
+        # Pas de tendance à la hausse exploitable, régression trop
+        # bruitée pour dire quoi que ce soit (r2 quasi nul), ou déjà
+        # au-dessus du seuil (ce n'est plus une prévision mais un
+        # incident réel) : rien à signaler ici.
+        if pente <= 0 or confiance < 0.15 or valeur_actuelle >= seuil:
             continue
 
         heures_avant = (seuil - valeur_actuelle) / pente
         if heures_avant <= 0 or heures_avant > Config.PREDICTION_HORIZON:
             continue
 
-        niveau_cible = "critique" if heures_avant <= 4 else "warning"
+        # Une régression peu fiable (r2 faible) ne doit pas s'afficher
+        # comme "Critique"/"Vigilance" — ce serait présenter une estimation
+        # bruitée comme un fait établi. On la déclasse en 'incertain'.
+        if confiance < Config.CONFIDENCE_THRESHOLD:
+            niveau_cible = "incertain"
+        else:
+            niveau_cible = "critique" if heures_avant <= 4 else "warning"
 
         previsions.append({
             'serveur': serveur,
@@ -1837,10 +1867,6 @@ _PAGE = """
       <div class="status-value">{{ stats.active_predictions|default(0) }}</div>
       <div class="status-label">Prédictions actives</div>
     </div>
-    <div class="status-item">
-      <div class="status-value">{{ "%.1f"|format(stats.avg_confidence|default(0)*100) }}%</div>
-      <div class="status-label">Confiance moyenne</div>
-    </div>
   </div>
 
   <!-- Prévisions -->
@@ -1848,20 +1874,23 @@ _PAGE = """
 
   {% if fiabilite_globale.fiabilite_pct is not none %}
   <div style="margin: 16px 0; padding: 14px 16px; background: var(--panel2); border-radius: 8px; font-size: 14px;">
-    📊 <strong>Fiabilité mesurée sur 30 jours : {{ fiabilite_globale.fiabilite_pct }}%</strong>
-    des alertes précédentes se sont confirmées
-    ({{ fiabilite_globale.nb_confirmees }} confirmées / {{ fiabilite_globale.nb_fausses_alertes }} fausses alertes).
+    📊 <strong>Sur les 30 derniers jours</strong> : le système a lancé
+    {{ fiabilite_globale.nb_confirmees + fiabilite_globale.nb_fausses_alertes + fiabilite_globale.nb_annulees|default(0) }}
+    alerte(s) préventive(s). Résultat :
+    <strong>{{ fiabilite_globale.nb_confirmees }} juste(s)</strong> (le problème s'est vraiment produit),
+    <strong>{{ fiabilite_globale.nb_fausses_alertes }} fausse(s) alerte(s)</strong> (rien ne s'est passé).
     {% if fiabilite_globale.nb_annulees %}
-    {{ fiabilite_globale.nb_annulees }} autre(s) prévision(s) : la tendance est revenue à la normale d'elle-même avant l'échéance — ni une réussite, ni une erreur du modèle.
+    {{ fiabilite_globale.nb_annulees }} de plus se sont résorbée(s) toute(s) seule(s) avant l'échéance (ni une réussite, ni une erreur).
     {% endif %}
+    →  <strong>{{ fiabilite_globale.fiabilite_pct }}% de fiabilité.</strong>
     {% if fiabilite_globale.delai_moyen_anticipation_min %}
-    Anticipation moyenne quand l'alerte était juste : {{ fiabilite_globale.delai_moyen_anticipation_min|round(0)|int }} min.
+    Quand l'alerte était juste, elle a prévenu en moyenne {{ fiabilite_globale.delai_moyen_anticipation_min|round(0)|int }} min à l'avance.
     {% endif %}
   </div>
   {% else %}
   <div style="margin: 16px 0; padding: 14px 16px; background: var(--panel2); border-radius: 8px; font-size: 14px; color: var(--muted);">
-    ℹ️ Pas encore assez de prévisions passées confirmées ou infirmées pour mesurer une fiabilité réelle.
-    Les probabilités ci-dessous sont des estimations du modèle, pas encore validées par l'expérience.
+    ℹ️ Pas encore assez d'historique pour mesurer la fiabilité réelle du système sur vos serveurs.
+    Les probabilités affichées ci-dessous sont les estimations du modèle, pas encore confirmées par l'expérience.
   </div>
   {% endif %}
 
@@ -1902,7 +1931,7 @@ _PAGE = """
           <div class="metric-value">{{ (p.valeur_actuelle|float)|round(1) }}%</div>
           <div class="metric-label">{{ p.metrique_critique_label }} actuelle</div>
         </div>
-        {% if p.metrics_predites_display %}
+        {% if p.metrics_predites_display and (p.metrics_predites_display[0].valeur - p.valeur_actuelle)|abs >= 1 %}
         <div class="metric-item">
           <div class="metric-value">{{ p.metrics_predites_display[0].valeur }}%</div>
           <div class="metric-label">{{ p.metrics_predites_display[0].label }} dans {{ (p.temps_estime|float)|round(1) }}h</div>
@@ -1924,11 +1953,10 @@ _PAGE = """
 
       {% if p.fiabilite.fiabilite_pct is not none %}
       <div style="margin-top: 8px; font-size: 12px; color: var(--muted);">
-        ✅ Fiabilité historique pour ce serveur : {{ p.fiabilite.fiabilite_pct }}%
-        ({{ p.fiabilite.nb_confirmees }} confirmées / {{ p.fiabilite.nb_fausses_alertes }} fausses alertes sur 30 jours)
-        {% if p.fiabilite.nb_annulees %}
-        — {{ p.fiabilite.nb_annulees }} tendance(s) résorbée(s) d'elle-même
-        {% endif %}
+        ✅ Sur ce serveur (30 derniers jours) : {{ p.fiabilite.nb_confirmees }} alerte(s) juste(s),
+        {{ p.fiabilite.nb_fausses_alertes }} fausse(s) alerte(s)
+        {%- if p.fiabilite.nb_annulees %}, {{ p.fiabilite.nb_annulees }} résorbée(s) seule(s){% endif %}.
+        Fiabilité : {{ p.fiabilite.fiabilite_pct }}%.
       </div>
       {% endif %}
     </div>
@@ -1943,27 +1971,6 @@ _PAGE = """
         Le système analyse en continu les tendances de vos serveurs.
         Des prévisions apparaîtront automatiquement lorsqu'une anomalie est probable.
       </p>
-    </div>
-  </div>
-  {% endif %}
-
-  <!-- Performance des modèles -->
-  {% if stats.performance %}
-  <div style="margin-top: 24px;">
-    <h2>📊 Performance des Modèles</h2>
-    <div class="model-status">
-      {% if stats.performance.classification_accuracy is defined %}
-      <div class="status-item">
-        <div class="status-value">{{ "%.1f"|format(stats.performance.classification_accuracy * 100) }}%</div>
-        <div class="status-label">Précision de détection des anomalies</div>
-      </div>
-      {% endif %}
-      {% if stats.performance.regression_rmse is defined %}
-      <div class="status-item">
-        <div class="status-value">±{{ "%.1f"|format(stats.performance.regression_rmse * 100) }} pts</div>
-        <div class="status-label">Marge d'erreur des valeurs prédites</div>
-      </div>
-      {% endif %}
     </div>
   </div>
   {% endif %}
@@ -2008,6 +2015,12 @@ def page_provisionnement():
             apercu['phrase'] = f"🔵 Collecte de données en cours pour {serveur} — pas encore assez d'historique pour une prédiction fiable."
         elif apercu['niveau_cible'] == 'sain':
             apercu['phrase'] = f"🟢 {serveur} : aucune tendance à risque détectée actuellement."
+        elif apercu['niveau_cible'] == 'incertain':
+            apercu['phrase'] = (
+                f"🔵 {serveur} : un signal de risque est détecté sur {apercu.get('metrique_critique_label', 'une métrique')}, "
+                f"mais le modèle n'a pas encore assez de recul pour l'affirmer avec certitude. "
+                f"À surveiller, pas encore une alerte confirmée."
+            )
         else:
             apercu['phrase'] = phrase_prevision_ml(apercu)
         all_previsions.append(apercu)
