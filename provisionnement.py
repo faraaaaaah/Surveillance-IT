@@ -1368,6 +1368,75 @@ def _metrique_critique(valeurs: dict) -> str:
     return max(valeurs, key=valeurs.get) if valeurs else 'cpu'
 
 
+_COULEUR_NIVEAU = {
+    'critique': '#ef4444',
+    'warning': '#f59e0b',
+    'incertain': '#3b82f6',
+    'surveillance': '#3b82f6',
+    'sain': '#22c55e',
+}
+
+
+def _graphique_tendance_svg(valeurs_recentes: list, valeur_predite: float,
+                             temps_estime_h: float, seuil: float, niveau: str) -> str:
+    """Mini-graphique SVG : historique récent (ligne pleine) + projection
+    jusqu'à l'échéance estimée (ligne pointillée) + seuil critique (ligne
+    horizontale). Généré côté serveur, aucune librairie JS nécessaire.
+    Objectif : remplacer des chiffres isolés par une image qu'on comprend
+    en un coup d'œil ("ça monte, et voilà où ça va taper le seuil")."""
+    if not valeurs_recentes or len(valeurs_recentes) < 3:
+        return ""
+
+    W, H, PAD = 320, 110, 10
+    # On garde au plus 20 points pour rester lisible (échantillonnage régulier)
+    if len(valeurs_recentes) > 20:
+        pas = len(valeurs_recentes) / 20
+        valeurs_recentes = [valeurs_recentes[int(i * pas)] for i in range(20)]
+
+    plafond = max(seuil, max(valeurs_recentes), valeur_predite) * 1.12
+    plafond = max(plafond, 10)
+
+    def y_de(v):
+        return H - PAD - (max(0, min(v, plafond)) / plafond) * (H - 2 * PAD)
+
+    n = len(valeurs_recentes)
+    # L'historique occupe les 2/3 gauches, la projection le 1/3 droit
+    x_hist_fin = W * 0.62
+    x_proj_fin = W - PAD
+
+    pts_hist = [(PAD + i * (x_hist_fin - PAD) / (n - 1), y_de(v)) for i, v in enumerate(valeurs_recentes)]
+    poly_hist = " ".join(f"{x:.1f},{y:.1f}" for x, y in pts_hist)
+
+    x_last, y_last = pts_hist[-1]
+    x_pred, y_pred = x_proj_fin, y_de(valeur_predite)
+
+    couleur = _COULEUR_NIVEAU.get(niveau, '#3b82f6')
+    y_seuil = y_de(seuil)
+
+    delai_txt = f"+{temps_estime_h:.1f}h".replace(".0h", "h")
+
+    return f"""
+    <svg viewBox="0 0 {W} {H}" width="100%" height="{H}" style="display:block; margin-top:10px;">
+      <line x1="{PAD}" y1="{y_seuil:.1f}" x2="{x_proj_fin}" y2="{y_seuil:.1f}"
+            stroke="{couleur}" stroke-width="1" stroke-dasharray="3,4" opacity="0.55"/>
+      <text x="{x_proj_fin}" y="{y_seuil - 4:.1f}" text-anchor="end" font-size="9"
+            fill="{couleur}" opacity="0.8">seuil {seuil:.0f}%</text>
+
+      <polyline points="{poly_hist}" fill="none" stroke="var(--muted)" stroke-width="2"
+                stroke-linecap="round" stroke-linejoin="round"/>
+
+      <line x1="{x_last:.1f}" y1="{y_last:.1f}" x2="{x_pred:.1f}" y2="{y_pred:.1f}"
+            stroke="{couleur}" stroke-width="2" stroke-dasharray="4,4" stroke-linecap="round"/>
+
+      <circle cx="{x_last:.1f}" cy="{y_last:.1f}" r="3" fill="var(--text)"/>
+      <circle cx="{x_pred:.1f}" cy="{y_pred:.1f}" r="4" fill="{couleur}"/>
+
+      <text x="{x_last:.1f}" y="{H - 1}" text-anchor="middle" font-size="9" fill="var(--muted)">maintenant</text>
+      <text x="{x_pred:.1f}" y="{H - 1}" text-anchor="end" font-size="9" fill="{couleur}">{delai_txt}</text>
+    </svg>
+    """
+
+
 def _feature_importance_display(feature_importance: dict) -> list:
     """Top 3 features avec une contribution significative (>= 2%), en
     langage clair. Le reste (bruit, quasi nul) est masqué : peu de valeur
@@ -1417,6 +1486,7 @@ def apercu_serveur(serveur: str) -> Dict:
         'confiance': 0.0,
         'valeur_actuelle': 0.0,
         'metrique_critique_label': _label_feature('cpu'),
+        'chart_svg': '',
         'fiabilite': fiabilite,
     }
 
@@ -1441,17 +1511,27 @@ def apercu_serveur(serveur: str) -> Dict:
         if simples:
             p = simples[0]
             niveau = p['niveau_cible']
+            metrique = p.get('type_anomalie', 'cpu')
+            historique_metrique = [_num(m.get(metrique, 0)) for m in recent_measures]
+            # 'temps_estime' est par construction le délai avant d'atteindre
+            # le seuil (voir generer_previsions_simple) : la valeur prédite
+            # à cette échéance est donc simplement le seuil lui-même.
+            valeur_predite = Config.THRESHOLDS.get(metrique, 90)
             base.update({
                 'niveau_cible': niveau,
                 'niveau_emoji': NIVEAU_LABELS.get(niveau, ('⚪', niveau))[0],
                 'niveau_label': NIVEAU_LABELS.get(niveau, ('⚪', niveau))[1],
                 'valeur_actuelle': _num(p.get('valeur_actuelle')),
-                'metrique_critique_label': _label_feature(p.get('type_anomalie', 'cpu')),
+                'metrique_critique_label': _label_feature(metrique),
                 'confiance': _num(p.get('confiance')),
                 'probabilite': _num(p.get('probabilite')),
                 'temps_estime': _num(p.get('temps_estime')),
                 'metrics': p.get('metrics', {}),
                 'ml_confidence': p.get('ml_confidence', 'estimation simple'),
+                'chart_svg': _graphique_tendance_svg(
+                    historique_metrique, valeur_predite, _num(p.get('temps_estime')),
+                    Config.THRESHOLDS.get(metrique, 90), niveau,
+                ),
             })
             return base
         niveau = 'sain'
@@ -1491,6 +1571,10 @@ def apercu_serveur(serveur: str) -> Dict:
     confiance = _num(prediction.get('confiance'))
     metrique_critique = _metrique_critique(valeurs_actuelles)
 
+    valeur_metrique_critique = _num(valeurs_actuelles.get(metrique_critique, 0))
+    valeur_predite_critique = metrics_predites.get(metrique_critique, valeur_metrique_critique)
+    historique_metrique = [_num(m.get(metrique_critique, 0)) for m in recent_measures]
+
     base.update({
         'niveau_cible': niveau,
         'niveau_emoji': NIVEAU_LABELS[niveau][0],
@@ -1504,6 +1588,11 @@ def apercu_serveur(serveur: str) -> Dict:
         'ml_confidence': 'haute' if confiance > 0.7 else 'moyenne' if confiance > 0.4 else 'basse',
         'metrics_predites_display': _metrics_predites_display(metrics_predites, metrique_critique),
         'metrics': valeurs_actuelles,
+        'chart_svg': _graphique_tendance_svg(
+            historique_metrique, valeur_predite_critique,
+            _num(prediction.get('temps_estime_avant_anomalie')),
+            Config.THRESHOLDS.get(metrique_critique, 90), niveau,
+        ),
     })
     return base
 
@@ -1938,6 +2027,10 @@ _PAGE = """
         </div>
         {% endif %}
       </div>
+
+      {% if p.chart_svg %}
+      {{ p.chart_svg|safe }}
+      {% endif %}
 
       {% if p.feature_importance_display %}
       <div class="feature-importance">
