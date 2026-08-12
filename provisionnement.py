@@ -1823,31 +1823,13 @@ _PAGE = """
     </div>
     <div class="status-item">
       <div class="status-value">{{ "%.1f"|format(stats.avg_confidence|default(0)*100) }}%</div>
-      <div class="status-label">Confiance moyenne</div>
+
     </div>
   </div>
 
   <!-- Prévisions -->
   {% if previsions %}
 
-  {% if fiabilite_globale.fiabilite_pct is not none %}
-  <div style="margin: 16px 0; padding: 14px 16px; background: var(--panel2); border-radius: 8px; font-size: 14px;">
-    📊 <strong>Fiabilité mesurée sur 30 jours : {{ fiabilite_globale.fiabilite_pct }}%</strong>
-    des alertes précédentes se sont confirmées
-    ({{ fiabilite_globale.nb_confirmees }} confirmées / {{ fiabilite_globale.nb_fausses_alertes }} fausses alertes).
-    {% if fiabilite_globale.nb_annulees %}
-    {{ fiabilite_globale.nb_annulees }} autre(s) prévision(s) : la tendance est revenue à la normale d'elle-même avant l'échéance — ni une réussite, ni une erreur du modèle.
-    {% endif %}
-    {% if fiabilite_globale.delai_moyen_anticipation_min %}
-    Anticipation moyenne quand l'alerte était juste : {{ fiabilite_globale.delai_moyen_anticipation_min|round(0)|int }} min.
-    {% endif %}
-  </div>
-  {% else %}
-  <div style="margin: 16px 0; padding: 14px 16px; background: var(--panel2); border-radius: 8px; font-size: 14px; color: var(--muted);">
-    ℹ️ Pas encore assez de prévisions passées confirmées ou infirmées pour mesurer une fiabilité réelle.
-    Les probabilités ci-dessous sont des estimations du modèle, pas encore validées par l'expérience.
-  </div>
-  {% endif %}
 
   <div class="ml-dashboard">
     {% for p in previsions %}
@@ -1861,9 +1843,7 @@ _PAGE = """
             {{ p.niveau_emoji }} {{ p.niveau_label }}
           </div>
         </div>
-        <div>
-          <span class="badge {{ confidence_class }}">Confiance modèle : {{ ((p.confiance|float) * 100)|round(0) }}%</span>
-        </div>
+    
       </div>
 
       <div style="margin: 12px 0;">
@@ -1931,26 +1911,6 @@ _PAGE = """
   </div>
   {% endif %}
 
-  <!-- Performance des modèles -->
-  {% if stats.performance %}
-  <div style="margin-top: 24px;">
-    <h2>📊 Performance des Modèles</h2>
-    <div class="model-status">
-      {% if stats.performance.classification_accuracy is defined %}
-      <div class="status-item">
-        <div class="status-value">{{ "%.1f"|format(stats.performance.classification_accuracy * 100) }}%</div>
-        <div class="status-label">Précision de détection des anomalies</div>
-      </div>
-      {% endif %}
-      {% if stats.performance.regression_rmse is defined %}
-      <div class="status-item">
-        <div class="status-value">±{{ "%.1f"|format(stats.performance.regression_rmse * 100) }} pts</div>
-        <div class="status-label">Marge d'erreur des valeurs prédites</div>
-      </div>
-      {% endif %}
-    </div>
-  </div>
-  {% endif %}
 </main>
 
 <script>""" + JS_TEMA_ET_MENU + """</script>
