@@ -1265,6 +1265,37 @@ def _num(value, default: float = 0.0) -> float:
         return default
 
 
+# Traduction des noms techniques de features (utilisés en interne par le
+# modèle) vers un libellé compréhensible par un employé/admin non technique.
+FEATURE_LABELS = {
+    'cpu': 'Utilisation CPU',
+    'memoire': 'Utilisation mémoire',
+    'disque_pct': 'Utilisation disque',
+    'cpu_rolling_mean_5': 'Tendance CPU (moy. récente)',
+    'memoire_rolling_mean_5': 'Tendance mémoire (moy. récente)',
+    'disque_pct_rolling_mean_5': 'Tendance disque (moy. récente)',
+    'is_weekend': 'Week-end',
+    'is_business_hours': 'Heures ouvrées',
+    'hour_of_day': "Heure de la journée",
+    'nb_processus': 'Nombre de processus',
+    'paquets_perdus': 'Paquets réseau perdus',
+    'batterie': 'Niveau batterie',
+}
+
+
+def _label_feature(nom: str) -> str:
+    return FEATURE_LABELS.get(nom, nom.replace('_', ' ').capitalize())
+
+
+NIVEAU_LABELS = {
+    'critique': ('🔴', 'Critique'),
+    'warning': ('🟠', 'Vigilance'),
+    'surveillance': ('🔵', 'À surveiller'),
+    'sain': ('🟢', 'Sain'),
+    'collecte': ('⚪', 'Collecte en cours'),
+}
+
+
 def generer_previsions(serveur: str) -> List[Dict]:
     """Fonction de compatibilité"""
     integrator = get_integrator()
@@ -1313,6 +1344,24 @@ def generer_previsions(serveur: str) -> List[Dict]:
     return [prevision]
 
 
+def _feature_importance_display(feature_importance: dict) -> list:
+    """Top 3 features avec une contribution significative (>= 2%), en
+    langage clair. Le reste (bruit, quasi nul) est masqué : peu de valeur
+    informative pour un humain et donne une fausse impression de précision."""
+    items = sorted(feature_importance.items(), key=lambda kv: kv[1], reverse=True)
+    return [
+        {'label': _label_feature(k), 'pct': round(v * 100)}
+        for k, v in items if v >= 0.02
+    ][:3]
+
+
+def _metrics_predites_display(metrics_predites: dict) -> list:
+    return [
+        {'label': _label_feature(k), 'valeur': round(v, 1)}
+        for k, v in metrics_predites.items()
+    ]
+
+
 def apercu_serveur(serveur: str) -> Dict:
     """Statut ML toujours renvoyé pour un serveur, utilisé uniquement pour
     l'affichage de la page /provisionnement (contrairement à
@@ -1324,23 +1373,31 @@ def apercu_serveur(serveur: str) -> Dict:
     integrator = get_integrator()
     recent_measures = historique.recuperer_mesures(serveur, heures=2)
 
+    # Fiabilité réelle mesurée sur les prévisions passées de ce serveur
+    # (confirmées vs fausses alertes) — c'est la seule mesure honnête de
+    # "est-ce que je peux faire confiance à ce que le modèle dit", par
+    # opposition aux pourcentages bruts du modèle lui-même qui ne disent
+    # rien sur sa fiabilité réelle en conditions réelles.
+    fiabilite = historique.statistiques_fiabilite_previsions(serveur=serveur, jours=30)
+
     base = {
         'serveur': serveur,
-        'type_anomalie': 'multi',
-        'feature_importance': {},
+        'feature_importance_display': [],
+        'metrics_predites_display': [],
         'metrics': {},
-        'metrics_predites': {},
-        'ensemble_details': {},
-        'performance_metrics': {},
         'temps_estime': 0.0,
         'probabilite': 0.0,
         'confiance': 0.0,
         'valeur_actuelle': 0.0,
+        'fiabilite': fiabilite,
     }
 
     if len(recent_measures) < 10:
+        niveau = 'collecte'
         base.update({
-            'niveau_cible': 'collecte',
+            'niveau_cible': niveau,
+            'niveau_emoji': NIVEAU_LABELS[niveau][0],
+            'niveau_label': NIVEAU_LABELS[niveau][1],
             'ml_confidence': f"Collecte de données en cours ({len(recent_measures)}/10 mesures)",
         })
         return base
@@ -1355,19 +1412,24 @@ def apercu_serveur(serveur: str) -> Dict:
         simples = generer_previsions_simple(serveur)
         if simples:
             p = simples[0]
+            niveau = p['niveau_cible']
             base.update({
-                'niveau_cible': p['niveau_cible'],
+                'niveau_cible': niveau,
+                'niveau_emoji': NIVEAU_LABELS.get(niveau, ('⚪', niveau))[0],
+                'niveau_label': NIVEAU_LABELS.get(niveau, ('⚪', niveau))[1],
                 'valeur_actuelle': _num(p.get('valeur_actuelle')),
                 'confiance': _num(p.get('confiance')),
                 'probabilite': _num(p.get('probabilite')),
                 'temps_estime': _num(p.get('temps_estime')),
                 'metrics': p.get('metrics', {}),
-                'ensemble_details': p.get('ensemble_details', {}),
                 'ml_confidence': p.get('ml_confidence', 'estimation simple'),
             })
             return base
+        niveau = 'sain'
         base.update({
-            'niveau_cible': 'sain',
+            'niveau_cible': niveau,
+            'niveau_emoji': NIVEAU_LABELS[niveau][0],
+            'niveau_label': NIVEAU_LABELS[niveau][1],
             'ml_confidence': "estimation simple (historique insuffisant pour le ML complet)",
         })
         return base
@@ -1386,27 +1448,23 @@ def apercu_serveur(serveur: str) -> Dict:
     metrics_predites = {
         k: _num(v) for k, v in prediction.get('metrics_predites', {}).items()
     }
-    feature_importance = dict(
-        sorted(
-            ((k, _num(v)) for k, v in prediction.get('feature_importance', {}).items()),
-            key=lambda kv: kv[1],
-            reverse=True,
-        )[:5]
-    )
+    feature_importance = {
+        k: _num(v) for k, v in prediction.get('feature_importance', {}).items()
+    }
     confiance = _num(prediction.get('confiance'))
 
     base.update({
         'niveau_cible': niveau,
+        'niveau_emoji': NIVEAU_LABELS[niveau][0],
+        'niveau_label': NIVEAU_LABELS[niveau][1],
         'valeur_actuelle': _num(max(valeurs_actuelles.values(), key=_num)) if valeurs_actuelles else 0.0,
         'confiance': confiance,
         'probabilite': proba,
         'temps_estime': _num(prediction.get('temps_estime_avant_anomalie')),
-        'feature_importance': feature_importance,
+        'feature_importance_display': _feature_importance_display(feature_importance),
         'ml_confidence': 'haute' if confiance > 0.7 else 'moyenne' if confiance > 0.4 else 'basse',
+        'metrics_predites_display': _metrics_predites_display(metrics_predites),
         'metrics': valeurs_actuelles,
-        'metrics_predites': metrics_predites,
-        'ensemble_details': prediction.get('ensemble_details', {}),
-        'performance_metrics': prediction.get('performance_metrics', {}),
     })
     return base
 
@@ -1549,7 +1607,8 @@ def traiter_previsions_serveur(serveur: str, envoyer_alerte_preventive=None) -> 
     return resultats
 
 def phrase_prevision_ml(p: Dict) -> str:
-    """Génère un message pour une prévision ML"""
+    """Génère un message pour une prévision ML, en langage clair (noms de
+    métriques traduits, pas de jargon technique)."""
     proba = p.get('probabilite', 0)
     delai = p.get('temps_estime', 1)
     niveau = p['niveau_cible']
@@ -1563,16 +1622,17 @@ def phrase_prevision_ml(p: Dict) -> str:
     valeurs = {k: v for k, v in metrics.items() if k in Config.METRICS}
     metric_critique = max(valeurs, key=valeurs.get) if valeurs else 'cpu'
     valeur_actuelle = valeurs.get(metric_critique, 0)
+    metric_label = _label_feature(metric_critique)
+    niveau_label = NIVEAU_LABELS.get(niveau, ('⚪', niveau))[1]
     
-    msg = f"🟡 Prévision ML: {metric_critique} pourrait atteindre un niveau {niveau} "
+    msg = f"🟡 Prévision ML : {metric_label} pourrait atteindre un niveau « {niveau_label} » "
     msg += f"dans environ {delai_txt} (probabilité {proba:.0f}%, confiance {p['confiance']*100:.0f}%). "
-    msg += f"Valeur actuelle: {valeur_actuelle:.1f}%. "
+    msg += f"Valeur actuelle : {valeur_actuelle:.1f}%. "
     
-    if p.get('feature_importance'):
-        top_features = sorted(p['feature_importance'].items(), key=lambda x: x[1], reverse=True)[:2]
-        if top_features:
-            features_str = ", ".join([f"{k}: {v*100:.0f}%" for k, v in top_features])
-            msg += f"Facteurs clés: {features_str}."
+    if p.get('feature_importance_display'):
+        top = p['feature_importance_display'][:2]
+        features_str = ", ".join([f"{f['label']} ({f['pct']}%)" for f in top])
+        msg += f"Facteurs clés : {features_str}."
     
     return msg
 
@@ -1775,6 +1835,23 @@ _PAGE = """
 
   <!-- Prévisions -->
   {% if previsions %}
+
+  {% if fiabilite_globale.fiabilite_pct is not none %}
+  <div style="margin: 16px 0; padding: 14px 16px; background: var(--panel2); border-radius: 8px; font-size: 14px;">
+    📊 <strong>Fiabilité mesurée sur 30 jours : {{ fiabilite_globale.fiabilite_pct }}%</strong>
+    des alertes précédentes se sont confirmées
+    ({{ fiabilite_globale.nb_confirmees }} confirmées / {{ fiabilite_globale.nb_fausses_alertes }} fausses alertes).
+    {% if fiabilite_globale.delai_moyen_anticipation_min %}
+    Anticipation moyenne quand l'alerte était juste : {{ fiabilite_globale.delai_moyen_anticipation_min|round(0)|int }} min.
+    {% endif %}
+  </div>
+  {% else %}
+  <div style="margin: 16px 0; padding: 14px 16px; background: var(--panel2); border-radius: 8px; font-size: 14px; color: var(--muted);">
+    ℹ️ Pas encore assez de prévisions passées confirmées ou infirmées pour mesurer une fiabilité réelle.
+    Les probabilités ci-dessous sont des estimations du modèle, pas encore validées par l'expérience.
+  </div>
+  {% endif %}
+
   <div class="ml-dashboard">
     {% for p in previsions %}
     {% set risk_class = 'risk-critical' if p.niveau_cible == 'critique' else 'risk-high' if p.niveau_cible == 'warning' else 'risk-moderate' if p.niveau_cible == 'surveillance' else 'risk-low' %}
@@ -1784,11 +1861,11 @@ _PAGE = """
         <div>
           <h3 style="margin: 0;">{{ p.serveur }}</h3>
           <div style="font-size: 12px; color: var(--muted);">
-            {{ p.type_anomalie|upper }} - {{ p.niveau_cible|upper }}
+            {{ p.niveau_emoji }} {{ p.niveau_label }}
           </div>
         </div>
         <div>
-          <span class="badge {{ confidence_class }}">{{ ((p.confiance|float) * 100)|round(0) }}%</span>
+          <span class="badge {{ confidence_class }}">Confiance modèle : {{ ((p.confiance|float) * 100)|round(0) }}%</span>
         </div>
       </div>
 
@@ -1812,54 +1889,32 @@ _PAGE = """
           <div class="metric-value">{{ (p.valeur_actuelle|float)|round(1) }}%</div>
           <div class="metric-label">Valeur actuelle</div>
         </div>
+        {% if p.metrics_predites_display %}
         <div class="metric-item">
-          <div class="metric-value">{{ (p.metrics_predites|first|last|float)|round(1) if p.metrics_predites else '—' }}%</div>
-          <div class="metric-label">Valeur prédite</div>
+          <div class="metric-value">{{ p.metrics_predites_display[0].valeur }}%</div>
+          <div class="metric-label">{{ p.metrics_predites_display[0].label }} (prédit)</div>
         </div>
+        {% endif %}
       </div>
 
-      {% if p.feature_importance %}
+      {% if p.feature_importance_display %}
       <div class="feature-importance">
-        {% for feature, importance in p.feature_importance.items() %}
-        <span class="feature-tag">{{ feature }}: {{ ((importance|float) * 100)|round(0) }}%</span>
+        {% for f in p.feature_importance_display %}
+        <span class="feature-tag">{{ f.label }} : {{ f.pct }}%</span>
         {% endfor %}
-      </div>
-      {% endif %}
-
-      {% if p.ensemble_details %}
-      <div class="ensemble-details">
-        <table>
-          {% if p.ensemble_details.xgb_probability is defined %}
-          <tr>
-            <td class="label">XGBoost</td>
-            <td>{{ "%.1f"|format(p.ensemble_details.xgb_probability * 100) }}%</td>
-          </tr>
-          {% endif %}
-          {% if p.ensemble_details.lstm_prediction %}
-          <tr>
-            <td class="label">LSTM</td>
-            <td>{{ "%.1f"|format(p.ensemble_details.lstm_prediction * 100) }}%</td>
-          </tr>
-          {% endif %}
-          {% if p.ensemble_details.prophet_predictions %}
-          <tr>
-            <td class="label">Prophet</td>
-            <td>{{ p.ensemble_details.prophet_predictions|join(', ') }}</td>
-          </tr>
-          {% endif %}
-          {% if p.ensemble_details.methode %}
-          <tr>
-            <td class="label">Méthode</td>
-            <td>{{ p.ensemble_details.methode }} ({{ p.ensemble_details.nb_points }} pts)</td>
-          </tr>
-          {% endif %}
-        </table>
       </div>
       {% endif %}
 
       <div style="margin-top: 12px; padding: 12px; background: var(--panel2); border-radius: 8px; font-size: 13px;">
         {{ p.phrase|default('Prédiction ML générée automatiquement') }}
       </div>
+
+      {% if p.fiabilite.fiabilite_pct is not none %}
+      <div style="margin-top: 8px; font-size: 12px; color: var(--muted);">
+        ✅ Fiabilité historique pour ce serveur : {{ p.fiabilite.fiabilite_pct }}%
+        ({{ p.fiabilite.nb_confirmees }} confirmées / {{ p.fiabilite.nb_fausses_alertes }} fausses alertes sur 30 jours)
+      </div>
+      {% endif %}
     </div>
     {% endfor %}
   </div>
@@ -1881,12 +1936,18 @@ _PAGE = """
   <div style="margin-top: 24px;">
     <h2>📊 Performance des Modèles</h2>
     <div class="model-status">
-      {% for model, value in stats.performance.items() %}
+      {% if stats.performance.classification_accuracy is defined %}
       <div class="status-item">
-        <div class="status-value">{{ "%.1f"|format(value * 100) }}%</div>
-        <div class="status-label">{{ model|replace('_', ' ')|title }}</div>
+        <div class="status-value">{{ "%.1f"|format(stats.performance.classification_accuracy * 100) }}%</div>
+        <div class="status-label">Précision de détection des anomalies</div>
       </div>
-      {% endfor %}
+      {% endif %}
+      {% if stats.performance.regression_rmse is defined %}
+      <div class="status-item">
+        <div class="status-value">±{{ "%.1f"|format(stats.performance.regression_rmse * 100) }} pts</div>
+        <div class="status-label">Marge d'erreur des valeurs prédites</div>
+      </div>
+      {% endif %}
     </div>
   </div>
   {% endif %}
@@ -1941,11 +2002,14 @@ def page_provisionnement():
     stats['active_predictions'] = sum(1 for p in all_previsions if p['niveau_cible'] in ('warning', 'critique'))
     if all_previsions:
         stats['avg_confidence'] = sum(p.get('confiance', 0) for p in all_previsions) / len(all_previsions)
-    
+
+    fiabilite_globale = historique.statistiques_fiabilite_previsions(jours=30)
+
     return render_template_string(
         _PAGE,
         previsions=all_previsions,
         stats=stats,
+        fiabilite_globale=fiabilite_globale,
         openshift_mode=Config.OPENSHIFT_MODE,
         topbar=render_topbar("provisionnement")
     )
