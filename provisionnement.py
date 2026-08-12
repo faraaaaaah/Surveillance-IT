@@ -1368,6 +1368,82 @@ def _metrique_critique(valeurs: dict) -> str:
     return max(valeurs, key=valeurs.get) if valeurs else 'cpu'
 
 
+_RECOMMANDATIONS = {
+    'cpu': {
+        'critique': "Identifier tout de suite le(s) processus qui consomme(nt) le plus (top/htop), et envisager un redémarrage du service concerné ou une bascule de charge.",
+        'warning': "Repérer les processus les plus gourmands et planifier une action (optimisation, redémarrage planifié) avant que ça ne devienne critique.",
+        'incertain': "Garder un œil sur les processus actifs — pas d'action urgente, le signal n'est pas encore assez net pour agir.",
+    },
+    'memoire': {
+        'critique': "Redémarrer le ou les services suspectés de fuite mémoire dès que possible, ou libérer de la RAM (fermer des processus inutiles).",
+        'warning': "Vérifier s'il y a une fuite mémoire progressive (un service qui grossit sans jamais redescendre) et planifier un redémarrage préventif.",
+        'incertain': "Surveiller l'évolution de la mémoire dans les prochaines heures avant d'agir.",
+    },
+    'disque_pct': {
+        'critique': "Libérer de l'espace disque en urgence (logs, fichiers temporaires, sauvegardes anciennes) ou étendre le volume.",
+        'warning': "Planifier un nettoyage (logs, caches, anciens fichiers) ou une extension de stockage avant d'atteindre la limite.",
+        'incertain': "Pas d'action requise dans l'immédiat — vérifier simplement que rien d'inhabituel ne remplit le disque.",
+    },
+}
+
+
+def _recommandation_action(metrique: str, niveau: str) -> str:
+    """Traduit une alerte en action concrète à faire, pas juste un chiffre.
+    C'est ce qui rend une prévision réellement utile pour un responsable :
+    pas seulement 'il y a un risque', mais 'voilà quoi faire'."""
+    return _RECOMMANDATIONS.get(metrique, {}).get(niveau, "")
+
+
+def _valeurs_metriques_brutes(recent_measures: list) -> dict:
+    """Dernières valeurs connues de chaque métrique surveillée (cpu,
+    mémoire, disque...), indépendamment du statut du modèle ML. Sert de
+    base commune à la vue d'ensemble et à la détection de risque combiné."""
+    if not recent_measures:
+        return {}
+    derniere = recent_measures[-1]
+    return {m: _num(derniere.get(m, 0)) for m in Config.METRICS if m in derniere}
+
+
+RATIO_METRIQUE_ELEVEE = 0.75  # 75% du seuil : on considère la métrique "sous tension"
+
+
+def _risque_combine(valeurs_metriques: dict) -> Optional[dict]:
+    """Détecte quand plusieurs métriques sont sous tension EN MÊME TEMPS
+    sur un même serveur. Un CPU élevé tout seul, ou un disque élevé tout
+    seul, c'est gérable. Les deux à la fois, c'est souvent le signe d'un
+    vrai incident qui couve (ex: un processus qui boucle et remplit les
+    logs) — un risque qu'aucune métrique isolée ne fait ressortir."""
+    elevees = []
+    for m, v in valeurs_metriques.items():
+        seuil = Config.THRESHOLDS.get(m)
+        if seuil and v >= seuil * RATIO_METRIQUE_ELEVEE:
+            elevees.append((m, v))
+    if len(elevees) < 2:
+        return None
+    elevees.sort(key=lambda x: x[1], reverse=True)
+    noms = " et ".join(_label_feature(m) for m, _ in elevees)
+    detail = ", ".join(f"{_label_feature(m)} à {v:.0f}%" for m, v in elevees)
+    return {
+        'metriques': [m for m, _ in elevees],
+        'message': f"⚠️ Risque combiné : {noms} sont élevés en même temps sur ce serveur ({detail}). "
+                   f"C'est souvent le signe d'un incident réel qui couve, pas juste un indicateur isolé qui dérive.",
+    }
+
+
+def _classe_valeur(valeur: float, seuil: float) -> str:
+    """Classe une valeur par rapport à son seuil, pour la vue d'ensemble."""
+    if not seuil:
+        return 'ok'
+    ratio = valeur / seuil
+    if ratio >= 1.0:
+        return 'critique'
+    if ratio >= RATIO_METRIQUE_ELEVEE:
+        return 'alerte'
+    if ratio >= 0.5:
+        return 'attention'
+    return 'ok'
+
+
 _COULEUR_NIVEAU = {
     'critique': '#ef4444',
     'warning': '#f59e0b',
@@ -1476,6 +1552,9 @@ def apercu_serveur(serveur: str) -> Dict:
     # rien sur sa fiabilité réelle en conditions réelles.
     fiabilite = historique.statistiques_fiabilite_previsions(serveur=serveur, jours=30)
 
+    valeurs_metriques = _valeurs_metriques_brutes(recent_measures)
+    risque_combine = _risque_combine(valeurs_metriques)
+
     base = {
         'serveur': serveur,
         'feature_importance_display': [],
@@ -1487,6 +1566,9 @@ def apercu_serveur(serveur: str) -> Dict:
         'valeur_actuelle': 0.0,
         'metrique_critique_label': _label_feature('cpu'),
         'chart_svg': '',
+        'recommandation': '',
+        'valeurs_metriques': valeurs_metriques,
+        'risque_combine': risque_combine,
         'fiabilite': fiabilite,
     }
 
@@ -1532,6 +1614,7 @@ def apercu_serveur(serveur: str) -> Dict:
                     historique_metrique, valeur_predite, _num(p.get('temps_estime')),
                     Config.THRESHOLDS.get(metrique, 90), niveau,
                 ),
+                'recommandation': _recommandation_action(metrique, niveau),
             })
             return base
         niveau = 'sain'
@@ -1593,6 +1676,7 @@ def apercu_serveur(serveur: str) -> Dict:
             _num(prediction.get('temps_estime_avant_anomalie')),
             Config.THRESHOLDS.get(metrique_critique, 90), niveau,
         ),
+        'recommandation': _recommandation_action(metrique_critique, niveau),
     })
     return base
 
@@ -1783,6 +1867,18 @@ _PAGE = """
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <style>
 """ + TOKENS_CSS + """
+  .heatmap-table { width: 100%; border-collapse: collapse; font-size: 13px; }
+  .heatmap-table th { text-align: left; color: var(--muted); font-weight: 600; font-size: 11px;
+                      text-transform: uppercase; padding: 6px 10px; border-bottom: 1px solid var(--border); }
+  .heatmap-table td { padding: 8px 10px; border-bottom: 1px solid var(--border); }
+  .heatmap-serveur { font-weight: 600; white-space: nowrap; }
+  .heatmap-cell { text-align: center; }
+  .heatmap-pill { display: inline-block; min-width: 42px; padding: 3px 8px; border-radius: 999px; font-size: 12px; font-weight: 600; }
+  .heatmap-ok { background: rgba(34,197,94,0.15); color: #22c55e; }
+  .heatmap-attention { background: rgba(59,130,246,0.15); color: #3b82f6; }
+  .heatmap-alerte { background: rgba(245,158,11,0.18); color: #f59e0b; }
+  .heatmap-critique { background: rgba(239,68,68,0.18); color: #ef4444; }
+  .heatmap-inconnu { background: var(--panel2); color: var(--muted); }
   .ml-dashboard {
     display: grid;
     grid-template-columns: 1fr 1fr 1fr;
@@ -1958,6 +2054,46 @@ _PAGE = """
     </div>
   </div>
 
+  <!-- Vue d'ensemble comparative -->
+  {% if vue_ensemble %}
+  <div class="carte" style="margin: 16px 0; overflow-x: auto;">
+    <h3 style="margin: 0 0 12px; font-size: 14px;">Vue d'ensemble</h3>
+    <table class="heatmap-table">
+      <thead>
+        <tr>
+          <th>Serveur</th>
+          {% for col in colonnes_metriques %}
+          <th>{{ col.label }}</th>
+          {% endfor %}
+        </tr>
+      </thead>
+      <tbody>
+        {% for ligne in vue_ensemble %}
+        <tr>
+          <td class="heatmap-serveur">{{ ligne.serveur }}</td>
+          {% for col in colonnes_metriques %}
+          {% set cell = ligne.cellules.get(col.cle) %}
+          <td class="heatmap-cell">
+            {% if cell %}
+            <span class="heatmap-pill heatmap-{{ cell.classe }}">{{ cell.valeur|round(0)|int }}%</span>
+            {% else %}
+            <span class="heatmap-pill heatmap-inconnu">—</span>
+            {% endif %}
+          </td>
+          {% endfor %}
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+    <div style="margin-top: 10px; font-size: 11.5px; color: var(--muted); display:flex; gap:14px; flex-wrap:wrap;">
+      <span><span class="heatmap-pill heatmap-ok" style="padding:1px 8px;">·</span> Normal</span>
+      <span><span class="heatmap-pill heatmap-attention" style="padding:1px 8px;">·</span> À surveiller</span>
+      <span><span class="heatmap-pill heatmap-alerte" style="padding:1px 8px;">·</span> Sous tension</span>
+      <span><span class="heatmap-pill heatmap-critique" style="padding:1px 8px;">·</span> Au-dessus du seuil</span>
+    </div>
+  </div>
+  {% endif %}
+
   <!-- Prévisions -->
   {% if previsions %}
 
@@ -2032,6 +2168,12 @@ _PAGE = """
       {{ p.chart_svg|safe }}
       {% endif %}
 
+      {% if p.risque_combine %}
+      <div style="margin-top: 10px; padding: 10px 12px; background: rgba(239,68,68,0.1); border: 1px solid rgba(239,68,68,0.3); border-radius: 8px; font-size: 12.5px; color: var(--text);">
+        {{ p.risque_combine.message }}
+      </div>
+      {% endif %}
+
       {% if p.feature_importance_display %}
       <div class="feature-importance">
         {% for f in p.feature_importance_display %}
@@ -2043,6 +2185,12 @@ _PAGE = """
       <div style="margin-top: 12px; padding: 12px; background: var(--panel2); border-radius: 8px; font-size: 13px;">
         {{ p.phrase|default('Prédiction ML générée automatiquement') }}
       </div>
+
+      {% if p.recommandation %}
+      <div style="margin-top: 8px; padding: 12px; background: rgba(59,130,246,0.08); border-left: 3px solid #3b82f6; border-radius: 6px; font-size: 13px;">
+        🛠️ <strong>À faire :</strong> {{ p.recommandation }}
+      </div>
+      {% endif %}
 
       {% if p.fiabilite.fiabilite_pct is not none %}
       <div style="margin-top: 8px; font-size: 12px; color: var(--muted);">
@@ -2128,11 +2276,28 @@ def page_provisionnement():
 
     fiabilite_globale = historique.statistiques_fiabilite_previsions(jours=30)
 
+    # Vue d'ensemble comparative : une ligne par serveur, une colonne par
+    # métrique, basée sur les valeurs déjà calculées ci-dessus (pas de
+    # nouvelle requête). Donne en un coup d'œil ce qu'un tableau de
+    # chiffres serveur par serveur ne permet pas de voir : qui, parmi
+    # tous les serveurs, est réellement sous tension, sur quoi.
+    colonnes_metriques = [{'cle': m, 'label': _label_feature(m)} for m in Config.METRICS]
+    vue_ensemble = []
+    for apercu in all_previsions:
+        cellules = {}
+        for m in Config.METRICS:
+            if m in apercu.get('valeurs_metriques', {}):
+                v = apercu['valeurs_metriques'][m]
+                cellules[m] = {'valeur': v, 'classe': _classe_valeur(v, Config.THRESHOLDS.get(m))}
+        vue_ensemble.append({'serveur': apercu['serveur'], 'cellules': cellules})
+
     return render_template_string(
         _PAGE,
         previsions=all_previsions,
         stats=stats,
         fiabilite_globale=fiabilite_globale,
+        vue_ensemble=vue_ensemble,
+        colonnes_metriques=colonnes_metriques,
         openshift_mode=Config.OPENSHIFT_MODE,
         topbar=render_topbar("provisionnement")
     )
