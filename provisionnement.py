@@ -1344,6 +1344,15 @@ def generer_previsions(serveur: str) -> List[Dict]:
     return [prevision]
 
 
+def _metrique_critique(valeurs: dict) -> str:
+    """La métrique (cpu/mémoire/disque...) la plus élevée actuellement —
+    c'est celle qui pose le plus de risque, donc celle qu'on doit mettre
+    en avant partout (valeur actuelle, prédiction, message) pour rester
+    cohérent d'un bout à l'autre de la carte."""
+    valeurs = {k: v for k, v in (valeurs or {}).items() if k in Config.METRICS}
+    return max(valeurs, key=valeurs.get) if valeurs else 'cpu'
+
+
 def _feature_importance_display(feature_importance: dict) -> list:
     """Top 3 features avec une contribution significative (>= 2%), en
     langage clair. Le reste (bruit, quasi nul) est masqué : peu de valeur
@@ -1355,10 +1364,13 @@ def _feature_importance_display(feature_importance: dict) -> list:
     ][:3]
 
 
-def _metrics_predites_display(metrics_predites: dict) -> list:
+def _metrics_predites_display(metrics_predites: dict, metrique_prioritaire: str = None) -> list:
+    items = list(metrics_predites.items())
+    if metrique_prioritaire and metrique_prioritaire in metrics_predites:
+        items.sort(key=lambda kv: 0 if kv[0] == metrique_prioritaire else 1)
     return [
         {'label': _label_feature(k), 'valeur': round(v, 1)}
-        for k, v in metrics_predites.items()
+        for k, v in items
     ]
 
 
@@ -1389,6 +1401,7 @@ def apercu_serveur(serveur: str) -> Dict:
         'probabilite': 0.0,
         'confiance': 0.0,
         'valeur_actuelle': 0.0,
+        'metrique_critique_label': _label_feature('cpu'),
         'fiabilite': fiabilite,
     }
 
@@ -1418,6 +1431,7 @@ def apercu_serveur(serveur: str) -> Dict:
                 'niveau_emoji': NIVEAU_LABELS.get(niveau, ('⚪', niveau))[0],
                 'niveau_label': NIVEAU_LABELS.get(niveau, ('⚪', niveau))[1],
                 'valeur_actuelle': _num(p.get('valeur_actuelle')),
+                'metrique_critique_label': _label_feature(p.get('type_anomalie', 'cpu')),
                 'confiance': _num(p.get('confiance')),
                 'probabilite': _num(p.get('probabilite')),
                 'temps_estime': _num(p.get('temps_estime')),
@@ -1452,18 +1466,20 @@ def apercu_serveur(serveur: str) -> Dict:
         k: _num(v) for k, v in prediction.get('feature_importance', {}).items()
     }
     confiance = _num(prediction.get('confiance'))
+    metrique_critique = _metrique_critique(valeurs_actuelles)
 
     base.update({
         'niveau_cible': niveau,
         'niveau_emoji': NIVEAU_LABELS[niveau][0],
         'niveau_label': NIVEAU_LABELS[niveau][1],
         'valeur_actuelle': _num(max(valeurs_actuelles.values(), key=_num)) if valeurs_actuelles else 0.0,
+        'metrique_critique_label': _label_feature(metrique_critique),
         'confiance': confiance,
         'probabilite': proba,
         'temps_estime': _num(prediction.get('temps_estime_avant_anomalie')),
         'feature_importance_display': _feature_importance_display(feature_importance),
         'ml_confidence': 'haute' if confiance > 0.7 else 'moyenne' if confiance > 0.4 else 'basse',
-        'metrics_predites_display': _metrics_predites_display(metrics_predites),
+        'metrics_predites_display': _metrics_predites_display(metrics_predites, metrique_critique),
         'metrics': valeurs_actuelles,
     })
     return base
@@ -1823,13 +1839,31 @@ _PAGE = """
     </div>
     <div class="status-item">
       <div class="status-value">{{ "%.1f"|format(stats.avg_confidence|default(0)*100) }}%</div>
-
+      <div class="status-label">Confiance moyenne</div>
     </div>
   </div>
 
   <!-- Prévisions -->
   {% if previsions %}
 
+  {% if fiabilite_globale.fiabilite_pct is not none %}
+  <div style="margin: 16px 0; padding: 14px 16px; background: var(--panel2); border-radius: 8px; font-size: 14px;">
+    📊 <strong>Fiabilité mesurée sur 30 jours : {{ fiabilite_globale.fiabilite_pct }}%</strong>
+    des alertes précédentes se sont confirmées
+    ({{ fiabilite_globale.nb_confirmees }} confirmées / {{ fiabilite_globale.nb_fausses_alertes }} fausses alertes).
+    {% if fiabilite_globale.nb_annulees %}
+    {{ fiabilite_globale.nb_annulees }} autre(s) prévision(s) : la tendance est revenue à la normale d'elle-même avant l'échéance — ni une réussite, ni une erreur du modèle.
+    {% endif %}
+    {% if fiabilite_globale.delai_moyen_anticipation_min %}
+    Anticipation moyenne quand l'alerte était juste : {{ fiabilite_globale.delai_moyen_anticipation_min|round(0)|int }} min.
+    {% endif %}
+  </div>
+  {% else %}
+  <div style="margin: 16px 0; padding: 14px 16px; background: var(--panel2); border-radius: 8px; font-size: 14px; color: var(--muted);">
+    ℹ️ Pas encore assez de prévisions passées confirmées ou infirmées pour mesurer une fiabilité réelle.
+    Les probabilités ci-dessous sont des estimations du modèle, pas encore validées par l'expérience.
+  </div>
+  {% endif %}
 
   <div class="ml-dashboard">
     {% for p in previsions %}
@@ -1843,13 +1877,15 @@ _PAGE = """
             {{ p.niveau_emoji }} {{ p.niveau_label }}
           </div>
         </div>
-    
+        <div>
+          <span class="badge {{ confidence_class }}">Confiance modèle : {{ ((p.confiance|float) * 100)|round(0) }}%</span>
+        </div>
       </div>
 
       <div style="margin: 12px 0;">
         <div style="display: flex; justify-content: space-between; font-size: 13px;">
           <span>Probabilité</span>
-          <span><strong>{{ p.probabilite }}%</strong></span>
+          <span><strong>{{ (p.probabilite|float)|round(0)|int }}%</strong></span>
         </div>
         <div class="progress-bar">
           <div class="progress-fill {% if p.probabilite > 70 %}red{% elif p.probabilite > 40 %}yellow{% else %}green{% endif %}" 
@@ -1864,12 +1900,12 @@ _PAGE = """
         </div>
         <div class="metric-item">
           <div class="metric-value">{{ (p.valeur_actuelle|float)|round(1) }}%</div>
-          <div class="metric-label">Valeur actuelle</div>
+          <div class="metric-label">{{ p.metrique_critique_label }} actuelle</div>
         </div>
         {% if p.metrics_predites_display %}
         <div class="metric-item">
           <div class="metric-value">{{ p.metrics_predites_display[0].valeur }}%</div>
-          <div class="metric-label">{{ p.metrics_predites_display[0].label }} (prédit)</div>
+          <div class="metric-label">{{ p.metrics_predites_display[0].label }} dans {{ (p.temps_estime|float)|round(1) }}h</div>
         </div>
         {% endif %}
       </div>
@@ -1911,6 +1947,26 @@ _PAGE = """
   </div>
   {% endif %}
 
+  <!-- Performance des modèles -->
+  {% if stats.performance %}
+  <div style="margin-top: 24px;">
+    <h2>📊 Performance des Modèles</h2>
+    <div class="model-status">
+      {% if stats.performance.classification_accuracy is defined %}
+      <div class="status-item">
+        <div class="status-value">{{ "%.1f"|format(stats.performance.classification_accuracy * 100) }}%</div>
+        <div class="status-label">Précision de détection des anomalies</div>
+      </div>
+      {% endif %}
+      {% if stats.performance.regression_rmse is defined %}
+      <div class="status-item">
+        <div class="status-value">±{{ "%.1f"|format(stats.performance.regression_rmse * 100) }} pts</div>
+        <div class="status-label">Marge d'erreur des valeurs prédites</div>
+      </div>
+      {% endif %}
+    </div>
+  </div>
+  {% endif %}
 </main>
 
 <script>""" + JS_TEMA_ET_MENU + """</script>
@@ -1924,6 +1980,10 @@ def page_provisionnement():
     import assignations
     
     autorisees = assignations.machines_autorisees(current_user)
+    # 'local' n'est pas un serveur a surveiller a proprement parler
+    # (pas assez d'historique / pas pertinent pour le provisionnement ML) :
+    # on le retire de l'affichage de cette page.
+    autorisees = {m for m in autorisees if m != "local"}
     if not autorisees:
         return render_template_string(
             _PAGE,
