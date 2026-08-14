@@ -199,20 +199,36 @@ def deployer_windows(ip, utilisateur, mot_de_passe, agent_local, nom_serveur, ur
     if not os.path.exists(agent_local):
         sys.exit(f"[deploiement] Fichier agent introuvable en local : {agent_local}")
 
-    print("[deploiement] Copie de l'agent sur la machine distante...")
+    print("[deploiement] Copie de l'agent sur la machine distante (par morceaux)...")
     with open(agent_local, "rb") as f:
         contenu_b64 = base64.b64encode(f.read()).decode()
 
     chemin_distant = "C:\\agent_surveillance.py"
-    # Ecriture via base64 pour eviter tout probleme d'encodage/guillemets
-    # avec le contenu du script transmis en une commande PowerShell.
-    script_ecriture = f"""
-$bytes = [System.Convert]::FromBase64String("{contenu_b64}")
-[System.IO.File]::WriteAllBytes("{chemin_distant}", $bytes)
-"""
-    code, _, erreur = executer_ps(script_ecriture)
+
+    # Transfert par petits blocs : une seule commande avec tout le contenu
+    # encode depasse la limite de longueur de ligne de commande de Windows
+    # des que le script agent fait plus de quelques centaines d'octets.
+    # TAILLE_BLOC doit rester un multiple de 4 (unite d'encodage base64).
+    TAILLE_BLOC = 1000
+    blocs = [contenu_b64[i:i + TAILLE_BLOC] for i in range(0, len(contenu_b64), TAILLE_BLOC)]
+
+    code, _, erreur = executer_ps(
+        f'if (Test-Path "{chemin_distant}") {{ Remove-Item "{chemin_distant}" -Force }}'
+    )
     if code != 0:
-        sys.exit(f"[deploiement] Echec de la copie de l'agent : {erreur}")
+        sys.exit(f"[deploiement] Echec de la preparation du fichier distant : {erreur}")
+
+    for i, bloc in enumerate(blocs, start=1):
+        script_ecriture = f"""
+$bytes = [System.Convert]::FromBase64String("{bloc}")
+$fs = [System.IO.File]::Open("{chemin_distant}", [System.IO.FileMode]::Append)
+$fs.Write($bytes, 0, $bytes.Length)
+$fs.Close()
+"""
+        code, _, erreur = executer_ps(script_ecriture)
+        if code != 0:
+            sys.exit(f"[deploiement] Echec de la copie de l'agent (bloc {i}/{len(blocs)}) : {erreur}")
+        print(f"[deploiement]   bloc {i}/{len(blocs)} transfere.")
 
     print("[deploiement] Creation de la tache planifiee (demarrage automatique)...")
     nom_tache = "AgentSurveillance"
