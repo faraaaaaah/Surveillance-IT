@@ -137,7 +137,7 @@ Description=Agent de surveillance
 After=network.target
 
 [Service]
-ExecStart=/usr/bin/python3 {chemin_distant} --url {url_ingest} --cle {cle_api}
+ExecStart=/usr/bin/python3 {chemin_distant} --nom {nom_serveur} --url {url_ingest} --cle {cle_api}
 Restart=always
 User={utilisateur}
 
@@ -232,7 +232,7 @@ $fs.Close()
 
     print("[deploiement] Creation de la tache planifiee (demarrage automatique)...")
     nom_tache = "AgentSurveillance"
-    commande_agent = f'python "{chemin_distant}" --url {url_ingest} --cle {cle_api}'
+    commande_agent = f'python "{chemin_distant}" --nom {nom_serveur} --url {url_ingest} --cle {cle_api}'
     script_tache = f"""
 schtasks /Create /TN "{nom_tache}" /TR '{commande_agent}' /SC ONSTART /RU "{utilisateur}" /RP "{mot_de_passe}" /F
 schtasks /Run /TN "{nom_tache}"
