@@ -550,10 +550,11 @@ def _message_erreur_deploiement(exc: Exception, os_cible: str) -> str:
 @app.route("/api/deployer", methods=["POST"])
 @login_required
 def api_deployer():
-    # Reserve aux comptes admin (memes droits que pour voir toutes les
-    # machines) : installer un agent sur une machine tierce avec des
-    # identifiants admin n'a pas a etre accessible aux comptes restreints.
-    if _machines_visibles() is not None:
+    # Reserve aux comptes admin (meme critere que le badge de role et que
+    # admin_required dans auth.py) : installer un agent sur une machine
+    # tierce avec des identifiants admin n'a pas a etre accessible aux
+    # comptes non-admin, independamment de leurs restrictions de machines.
+    if not current_user.is_admin:
         return jsonify({"succes": False, "erreur": "Reserve aux administrateurs."}), 403
 
     data = request.get_json(force=True, silent=True) or {}
@@ -592,7 +593,7 @@ def api_deployer():
 @login_required
 def accueil():
     bouton_ajout = ""
-    if _machines_visibles() is None:
+    if current_user.is_admin:
         bouton_ajout = ('<button id="btn-ajout-serveur" type="button" '
                          'onclick="ouvrirDeploiement()" title="Ajouter un serveur">+</button>')
     page = PAGE_HTML.replace("<!--__BARRE_UTILISATEUR__-->", auth.render_menu_utilisateur("dashboard"))
