@@ -83,7 +83,7 @@ def deployer_linux(ip, utilisateur, mot_de_passe, agent_local, nom_serveur, url_
     try:
         import paramiko
     except ImportError:
-        sys.exit("paramiko n'est pas installe. Lance : pip install paramiko")
+        raise RuntimeError("paramiko n'est pas installe. Lance : pip install paramiko")
 
     print(f"[deploiement] Connexion SSH a {ip}...")
     client = paramiko.SSHClient()
@@ -91,9 +91,11 @@ def deployer_linux(ip, utilisateur, mot_de_passe, agent_local, nom_serveur, url_
     try:
         client.connect(ip, username=utilisateur, password=mot_de_passe, timeout=10)
     except Exception as e:
-        sys.exit(f"[deploiement] Echec de connexion SSH a {ip} : {e}\n"
-                  f"Verifie que le service SSH est actif sur la machine cible "
-                  f"et que les identifiants sont corrects.")
+        raise RuntimeError(
+            f"Echec de connexion SSH a {ip} : {e}\n"
+            f"Verifie que le service SSH est actif sur la machine cible "
+            f"et que les identifiants sont corrects."
+        )
 
     def executer(commande, sudo=False):
         cmd = f"sudo -S {commande}" if sudo else commande
@@ -109,7 +111,7 @@ def deployer_linux(ip, utilisateur, mot_de_passe, agent_local, nom_serveur, url_
     print("[deploiement] Verification de Python3...")
     code, sortie, _ = executer("python3 --version")
     if code != 0:
-        sys.exit(f"[deploiement] Python3 n'est pas installe sur {ip}. "
+        raise RuntimeError(f"Python3 n'est pas installe sur {ip}. "
                   f"Installe-le manuellement d'abord (sudo apt install python3 python3-pip).")
     print(f"[deploiement] {sortie.strip()} trouve.")
 
@@ -119,11 +121,11 @@ def deployer_linux(ip, utilisateur, mot_de_passe, agent_local, nom_serveur, url_
         print(f"[deploiement] ⚠️  Echec pip3 --user, nouvelle tentative avec --break-system-packages...")
         code, sortie, erreur = executer("pip3 install --break-system-packages psutil requests")
         if code != 0:
-            sys.exit(f"[deploiement] Impossible d'installer les dependances : {erreur}")
+            raise RuntimeError(f"Impossible d'installer les dependances : {erreur}")
     print("[deploiement] Dependances installees.")
 
     if not os.path.exists(agent_local):
-        sys.exit(f"[deploiement] Fichier agent introuvable en local : {agent_local}")
+        raise RuntimeError(f"Fichier agent introuvable en local : {agent_local}")
 
     print("[deploiement] Copie de l'agent sur la machine distante...")
     sftp = client.open_sftp()
@@ -158,7 +160,7 @@ WantedBy=multi-user.target
         sudo=True
     )
     if code != 0:
-        sys.exit(f"[deploiement] Echec de la creation du service systemd : {erreur}")
+        raise RuntimeError(f"Echec de la creation du service systemd : {erreur}")
 
     print(f"[deploiement] ✅ Agent installe et demarre sur {ip} ({nom_serveur}).")
     print(f"[deploiement] Il redemarrera automatiquement avec la machine.")
@@ -173,7 +175,7 @@ def deployer_windows(ip, utilisateur, mot_de_passe, agent_local, nom_serveur, ur
     try:
         import winrm
     except ImportError:
-        sys.exit("pywinrm n'est pas installe. Lance : pip install pywinrm")
+        raise RuntimeError("pywinrm n'est pas installe. Lance : pip install pywinrm")
 
     print(f"[deploiement] Connexion WinRM a {ip}...")
     session = winrm.Session(ip, auth=(utilisateur, mot_de_passe), transport="ntlm")
@@ -185,7 +187,7 @@ def deployer_windows(ip, utilisateur, mot_de_passe, agent_local, nom_serveur, ur
     print("[deploiement] Verification de Python...")
     code, sortie, erreur = executer_ps("python --version")
     if code != 0:
-        sys.exit(f"[deploiement] Python n'est pas trouve sur {ip} (PATH). "
+        raise RuntimeError(f"Python n'est pas trouve sur {ip} (PATH). "
                   f"Installe-le manuellement d'abord sur la machine cible - "
                   f"l'installation automatique de Python via WinRM n'est pas geree par ce script.")
     print(f"[deploiement] {sortie.strip()} trouve.")
@@ -193,11 +195,11 @@ def deployer_windows(ip, utilisateur, mot_de_passe, agent_local, nom_serveur, ur
     print("[deploiement] Installation des dependances (psutil, requests)...")
     code, sortie, erreur = executer_ps("pip install psutil requests")
     if code != 0:
-        sys.exit(f"[deploiement] Echec installation dependances : {erreur}")
+        raise RuntimeError(f"Echec installation dependances : {erreur}")
     print("[deploiement] Dependances installees.")
 
     if not os.path.exists(agent_local):
-        sys.exit(f"[deploiement] Fichier agent introuvable en local : {agent_local}")
+        raise RuntimeError(f"Fichier agent introuvable en local : {agent_local}")
 
     print("[deploiement] Copie de l'agent sur la machine distante (par morceaux)...")
     with open(agent_local, "rb") as f:
@@ -216,7 +218,7 @@ def deployer_windows(ip, utilisateur, mot_de_passe, agent_local, nom_serveur, ur
         f'if (Test-Path "{chemin_distant}") {{ Remove-Item "{chemin_distant}" -Force }}'
     )
     if code != 0:
-        sys.exit(f"[deploiement] Echec de la preparation du fichier distant : {erreur}")
+        raise RuntimeError(f"Echec de la preparation du fichier distant : {erreur}")
 
     for i, bloc in enumerate(blocs, start=1):
         script_ecriture = f"""
@@ -227,7 +229,7 @@ $fs.Close()
 """
         code, _, erreur = executer_ps(script_ecriture)
         if code != 0:
-            sys.exit(f"[deploiement] Echec de la copie de l'agent (bloc {i}/{len(blocs)}) : {erreur}")
+            raise RuntimeError(f"Echec de la copie de l'agent (bloc {i}/{len(blocs)}) : {erreur}")
         print(f"[deploiement]   bloc {i}/{len(blocs)} transfere.")
 
     print("[deploiement] Creation de la tache planifiee (demarrage automatique)...")
@@ -239,7 +241,7 @@ schtasks /Run /TN "{nom_tache}"
 """
     code, sortie, erreur = executer_ps(script_tache)
     if code != 0:
-        sys.exit(f"[deploiement] Echec de la creation de la tache planifiee : {erreur}")
+        raise RuntimeError(f"Echec de la creation de la tache planifiee : {erreur}")
 
     print(f"[deploiement] ✅ Agent installe et demarre sur {ip} ({nom_serveur}).")
     print(f"[deploiement] Il redemarrera automatiquement avec la machine (tache planifiee '{nom_tache}').")
@@ -265,10 +267,13 @@ def main():
     mot_de_passe = getpass.getpass("Mot de passe (jamais affiche ni stocke) : ")
 
     debut = time.time()
-    if args.os == "linux":
-        deployer_linux(args.ip, utilisateur, mot_de_passe, args.agent, args.nom, args.url, args.cle)
-    else:
-        deployer_windows(args.ip, utilisateur, mot_de_passe, args.agent, args.nom, args.url, args.cle)
+    try:
+        if args.os == "linux":
+            deployer_linux(args.ip, utilisateur, mot_de_passe, args.agent, args.nom, args.url, args.cle)
+        else:
+            deployer_windows(args.ip, utilisateur, mot_de_passe, args.agent, args.nom, args.url, args.cle)
+    except RuntimeError as e:
+        sys.exit(f"[deploiement] ❌ {e}")
 
     print(f"[deploiement] Termine en {time.time() - debut:.1f}s.")
     print(f"[deploiement] Verifie dans quelques instants que '{args.nom}' apparait dans le dashboard.")
