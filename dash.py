@@ -45,6 +45,7 @@ from base_connaissances import base_connaissances_bp
 import provisionnement
 from provisionnement import provisionnement_bp
 from flask_socketio import join_room, emit as socketio_emit_local
+from deploiement_distant import deployer_linux, deployer_windows, AGENT_LOCAL_DEFAUT
 
 app = Flask(__name__)
 # Cle de session generee et sauvegardee automatiquement (voir auth.py) : pas
@@ -510,10 +511,93 @@ def api_chat():
     return jsonify({"reponse": reponse})
 
 
+def _message_erreur_deploiement(exc: Exception, os_cible: str) -> str:
+    """Traduit une exception technique (SSH/WinRM/reseau) en message clair,
+    affichable directement dans le formulaire d'ajout de serveur. Les
+    RuntimeError levees par deploiement_distant.py sont deja redigees a la
+    main pour etre lisibles -> on les garde telles quelles. Les autres
+    (timeouts reseau, erreurs paramiko/winrm brutes) sont traduites ici."""
+    texte = str(exc)
+    bas = texte.lower()
+
+    if "timed out" in bas or "timeout" in bas:
+        if os_cible == "windows":
+            return ("Impossible de joindre cette machine sur le port WinRM (5985). "
+                     "Verifiez qu'elle est allumee, sur le meme reseau, et que WinRM "
+                     "est active dessus (Enable-PSRemoting -Force en PowerShell administrateur).")
+        return ("Impossible de joindre cette machine sur le port SSH (22). "
+                 "Verifiez qu'elle est allumee, sur le meme reseau, et que le service SSH est actif.")
+
+    if "connection refused" in bas or "actively refused" in bas:
+        service = "WinRM" if os_cible == "windows" else "SSH"
+        return f"La machine a refuse la connexion {service} — le service {service} n'est probablement pas actif dessus."
+
+    if "authentication" in bas or "access is denied" in bas or "auth failed" in bas or " 401" in bas:
+        return "Identifiant ou mot de passe incorrect pour cette machine."
+
+    if "getaddrinfo failed" in bas or "name or service not known" in bas or "no address associated" in bas:
+        return "Adresse IP introuvable ou invalide."
+
+    if "paramiko n'est pas installe" in bas or "pywinrm n'est pas installe" in bas:
+        return "Composant technique manquant cote serveur du dashboard — contactez l'administrateur systeme."
+
+    if isinstance(exc, RuntimeError):
+        return texte
+
+    return f"Le deploiement a echoue de facon inattendue : {texte[:200]}"
+
+
+@app.route("/api/deployer", methods=["POST"])
+@login_required
+def api_deployer():
+    # Reserve aux comptes admin (memes droits que pour voir toutes les
+    # machines) : installer un agent sur une machine tierce avec des
+    # identifiants admin n'a pas a etre accessible aux comptes restreints.
+    if _machines_visibles() is not None:
+        return jsonify({"succes": False, "erreur": "Reserve aux administrateurs."}), 403
+
+    data = request.get_json(force=True, silent=True) or {}
+    nom = (data.get("nom") or "").strip()
+    ip = (data.get("ip") or "").strip()
+    os_cible = data.get("os") if data.get("os") in ("windows", "linux") else "windows"
+    login = (data.get("login") or "").strip()
+    mot_de_passe = data.get("motdepasse") or ""
+
+    if not nom or not ip or not login or not mot_de_passe:
+        return jsonify({"succes": False, "erreur": "Merci de remplir tous les champs."}), 400
+    if nom in _etat_serveurs:
+        return jsonify({"succes": False, "erreur": f"Un serveur nomme « {nom} » existe deja."}), 400
+
+    # L'agent doit remonter vers CE dashboard : on construit l'URL d'ingest
+    # a partir de l'URL sur laquelle l'admin est actuellement connecte,
+    # plutot que de la coder en dur (fonctionne en local comme sur la route
+    # OpenShift, sans configuration a maintenir a la main).
+    url_ingest = request.url_root.rstrip("/") + "/api/ingest"
+
+    try:
+        if os_cible == "linux":
+            deployer_linux(ip, login, mot_de_passe, AGENT_LOCAL_DEFAUT, nom, url_ingest, CLE_API)
+        else:
+            deployer_windows(ip, login, mot_de_passe, AGENT_LOCAL_DEFAUT, nom, url_ingest, CLE_API)
+        return jsonify({
+            "succes": True,
+            "message": f"« {nom} » a ete installe et demarre sur {ip}. "
+                       f"Il apparaitra dans la liste des serveurs sous quelques secondes.",
+        })
+    except Exception as e:
+        return jsonify({"succes": False, "erreur": _message_erreur_deploiement(e, os_cible)}), 502
+
+
 @app.route("/")
 @login_required
 def accueil():
-    return PAGE_HTML.replace("<!--__BARRE_UTILISATEUR__-->", auth.render_menu_utilisateur("dashboard"))
+    bouton_ajout = ""
+    if _machines_visibles() is None:
+        bouton_ajout = ('<button id="btn-ajout-serveur" type="button" '
+                         'onclick="ouvrirDeploiement()" title="Ajouter un serveur">+</button>')
+    page = PAGE_HTML.replace("<!--__BARRE_UTILISATEUR__-->", auth.render_menu_utilisateur("dashboard"))
+    page = page.replace("<!--__BOUTON_AJOUT__-->", bouton_ajout)
+    return page
 
 
 @socketio.on("connect")
@@ -645,6 +729,47 @@ PAGE_HTML = """
   .incident button:disabled{opacity:.4; cursor:default;}
   #vide-incidents{color:var(--muted); font-size:12.5px;}
 
+  /* En-tete sidebar (titre + bouton ajout de serveur) */
+  #sidebar .entete-sidebar{display:flex; align-items:center; justify-content:space-between; margin:6px 8px 14px;}
+  #sidebar .entete-sidebar h2{margin:0;}
+  #btn-ajout-serveur{background:var(--panel2); border:1px solid var(--border); color:var(--muted); width:22px; height:22px;
+                      border-radius:6px; cursor:pointer; font-size:15px; line-height:1; display:flex; align-items:center;
+                      justify-content:center; flex-shrink:0; padding:0;}
+  #btn-ajout-serveur:hover{color:var(--accent); border-color:var(--accent);}
+
+  /* Modal Ajout de serveur (deploiement agent) — fond flou pour rester
+     visuellement rattache au dashboard derriere plutot que de naviguer
+     vers une page separee. */
+  #modal-deploiement{display:none; position:fixed; inset:0; background:rgba(4,7,10,.55);
+                      backdrop-filter:blur(6px); -webkit-backdrop-filter:blur(6px);
+                      z-index:110; align-items:center; justify-content:center; padding:24px;}
+  #modal-deploiement.ouvert{display:flex;}
+  #modal-deploiement .contenu{background:var(--panel); border:1px solid var(--border); border-radius:12px;
+                               width:100%; max-width:420px; padding:24px; max-height:90vh; overflow-y:auto;}
+  #modal-deploiement .entete-modal{display:flex; justify-content:space-between; align-items:flex-start;}
+  #modal-deploiement h2{margin:0 0 4px; font-size:16px;}
+  #modal-deploiement .sous-titre{color:var(--muted); font-size:12.5px; margin:0 0 6px;}
+  #modal-deploiement .fermer{background:transparent; border:none; color:var(--muted); font-size:20px; cursor:pointer; line-height:1;}
+  #modal-deploiement label{display:block; font-size:12px; color:var(--muted); margin:14px 0 6px;}
+  #modal-deploiement input{width:100%; background:var(--panel2); border:1px solid var(--border); color:var(--text);
+                            padding:9px 11px; border-radius:7px; font-size:13.5px;}
+  #modal-deploiement input:focus{outline:none; border-color:var(--accent);}
+  #modal-deploiement .os-choix{display:flex; gap:8px; margin-top:6px;}
+  #modal-deploiement .os-choix label{flex:1; margin:0; text-align:center; padding:9px; border:1px solid var(--border);
+                                      border-radius:7px; cursor:pointer; background:var(--panel2); font-size:12.5px; color:var(--text);}
+  #modal-deploiement .os-choix input{display:none;}
+  #modal-deploiement .os-choix label.actif{border-color:var(--accent); background:rgba(88,166,255,.1); color:var(--accent); font-weight:600;}
+  #modal-deploiement .aide{font-size:11px; color:var(--muted); margin-top:5px; line-height:1.4;}
+  #modal-deploiement .actions{display:flex; gap:8px; margin-top:22px;}
+  #modal-deploiement .actions button{flex:1; padding:11px; border-radius:8px; font-size:13.5px; font-weight:600;
+                                      cursor:pointer; border:1px solid var(--border);}
+  #btn-deployer-submit{background:var(--accent); border-color:var(--accent); color:#08131f;}
+  #btn-deployer-submit:disabled{opacity:.6; cursor:wait;}
+  #btn-deployer-annuler{background:transparent; color:var(--text);}
+  #resultat-deploiement{margin-top:16px; padding:12px 14px; border-radius:8px; font-size:12.5px; line-height:1.5; display:none;}
+  #resultat-deploiement.ok{display:block; background:rgba(63,185,80,.12); border:1px solid var(--ok); color:var(--ok);}
+  #resultat-deploiement.err{display:block; background:rgba(248,81,73,.12); border:1px solid var(--crit); color:var(--crit);}
+
   /* Modal Historique detaille */
   #modal-historique{display:none; position:fixed; inset:0; background:rgba(0,0,0,.6); z-index:100; align-items:center; justify-content:center; padding:24px;}
   #modal-historique.ouvert{display:flex;}
@@ -705,7 +830,10 @@ PAGE_HTML = """
 
 <div id="layout">
   <div id="sidebar">
-    <h2>Serveurs</h2>
+    <div class="entete-sidebar">
+      <h2>Serveurs</h2>
+      <!--__BOUTON_AJOUT__-->
+    </div>
     <div id="liste-serveurs"><div style="color:var(--muted); font-size:12px; padding:8px;">En attente...</div></div>
   </div>
 
@@ -833,6 +961,46 @@ PAGE_HTML = """
       <button class="btn-periode" onclick="reinitialiserFiltresHistorique()" style="padding:7px 12px;">Reinitialiser</button>
     </div>
     <div class="liste" id="liste-historique"></div>
+  </div>
+</div>
+
+<div id="modal-deploiement">
+  <div class="contenu">
+    <div class="entete-modal">
+      <div>
+        <h2>Ajouter un serveur</h2>
+        <p class="sous-titre">Installe et démarre l'agent de surveillance sur la machine cible.</p>
+      </div>
+      <button class="fermer" onclick="fermerDeploiement()">&times;</button>
+    </div>
+
+    <form id="form-deploiement" onsubmit="soumettreDeploiement(event)">
+      <label>Nom affiché dans le dashboard</label>
+      <input type="text" id="dep-nom" placeholder="PC-Comptabilité" required>
+
+      <label>Adresse IP de la machine</label>
+      <input type="text" id="dep-ip" placeholder="192.168.1.42" required>
+
+      <label>Système d'exploitation</label>
+      <div class="os-choix" id="dep-os-choix">
+        <label class="actif" data-os="windows" onclick="choisirOsDeploiement('windows')">🪟 Windows</label>
+        <label data-os="linux" onclick="choisirOsDeploiement('linux')">🐧 Linux</label>
+      </div>
+
+      <label>Identifiant admin (sur la machine cible)</label>
+      <input type="text" id="dep-login" placeholder="Nom d'utilisateur" required>
+
+      <label>Mot de passe</label>
+      <input type="password" id="dep-motdepasse" placeholder="Mot de passe" required>
+      <p class="aide">Jamais enregistré, utilisé uniquement pour cette installation.</p>
+
+      <div class="actions">
+        <button type="button" id="btn-deployer-annuler" onclick="fermerDeploiement()">Annuler</button>
+        <button type="submit" id="btn-deployer-submit">Ajouter et déployer</button>
+      </div>
+    </form>
+
+    <div id="resultat-deploiement"></div>
   </div>
 </div>
 
@@ -1523,6 +1691,77 @@ function reinitialiserFiltresHistorique(){
 
 function fermerHistorique(){
   document.getElementById('modal-historique').classList.remove('ouvert');
+}
+
+// --- Modal Ajout de serveur (deploiement agent) -------------------------
+let osDeploiementChoisi = 'windows';
+
+function choisirOsDeploiement(os){
+  osDeploiementChoisi = os;
+  document.querySelectorAll('#dep-os-choix label').forEach(l => {
+    l.classList.toggle('actif', l.dataset.os === os);
+  });
+}
+
+function ouvrirDeploiement(){
+  document.getElementById('form-deploiement').reset();
+  choisirOsDeploiement('windows');
+  const resultat = document.getElementById('resultat-deploiement');
+  resultat.className = '';
+  resultat.textContent = '';
+  document.getElementById('modal-deploiement').classList.add('ouvert');
+}
+
+function fermerDeploiement(){
+  document.getElementById('modal-deploiement').classList.remove('ouvert');
+}
+
+async function soumettreDeploiement(ev){
+  ev.preventDefault();
+  const bouton = document.getElementById('btn-deployer-submit');
+  const resultat = document.getElementById('resultat-deploiement');
+  const texteInitial = bouton.textContent;
+  bouton.disabled = true;
+  bouton.textContent = 'Déploiement en cours...';
+  resultat.className = '';
+  resultat.textContent = '';
+
+  const payload = {
+    nom: document.getElementById('dep-nom').value.trim(),
+    ip: document.getElementById('dep-ip').value.trim(),
+    os: osDeploiementChoisi,
+    login: document.getElementById('dep-login').value.trim(),
+    motdepasse: document.getElementById('dep-motdepasse').value,
+  };
+
+  try{
+    const res = await fetch('/api/deployer', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify(payload),
+    });
+    const data = await res.json().catch(() => ({}));
+
+    if(res.ok && data.succes){
+      resultat.className = 'ok';
+      resultat.textContent = '✅ ' + data.message;
+      document.getElementById('form-deploiement').reset();
+      // La machine apparaitra automatiquement dans la sidebar des qu'elle
+      // enverra sa premiere mesure (evenement socket.io "maj_serveur") —
+      // pas besoin de rafraichir manuellement la liste ici.
+      setTimeout(fermerDeploiement, 3000);
+    } else {
+      resultat.className = 'err';
+      resultat.textContent = '❌ ' + (data.erreur || 'Échec du déploiement, sans détail disponible.');
+    }
+  } catch(err){
+    resultat.className = 'err';
+    resultat.textContent = '❌ Impossible de contacter le dashboard (connexion réseau interrompue).';
+    console.error('Erreur deploiement:', err);
+  } finally {
+    bouton.disabled = false;
+    bouton.textContent = texteInitial;
+  }
 }
 
 // --- Bouton Rapport (PDF a la demande) ---------------------------------
