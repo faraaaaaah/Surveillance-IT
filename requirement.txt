@@ -19,3 +19,5 @@ torch
 xgboost
 prophet
 boto3
+paramiko
+pywinrm
