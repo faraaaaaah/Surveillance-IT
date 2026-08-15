@@ -550,10 +550,6 @@ def _message_erreur_deploiement(exc: Exception, os_cible: str) -> str:
 @app.route("/api/deployer", methods=["POST"])
 @login_required
 def api_deployer():
-    # Reserve aux comptes admin (meme critere que le badge de role et que
-    # admin_required dans auth.py) : installer un agent sur une machine
-    # tierce avec des identifiants admin n'a pas a etre accessible aux
-    # comptes non-admin, independamment de leurs restrictions de machines.
     if not current_user.is_admin:
         return jsonify({"succes": False, "erreur": "Reserve aux administrateurs."}), 403
 
@@ -569,25 +565,33 @@ def api_deployer():
     if nom in _etat_serveurs:
         return jsonify({"succes": False, "erreur": f"Un serveur nomme « {nom} » existe deja."}), 400
 
-    # L'agent doit remonter vers CE dashboard : on construit l'URL d'ingest
-    # a partir de l'URL sur laquelle l'admin est actuellement connecte,
-    # plutot que de la coder en dur (fonctionne en local comme sur la route
-    # OpenShift, sans configuration a maintenir a la main).
     url_ingest = request.url_root.rstrip("/") + "/api/ingest"
 
+    # On lance le deploiement en arriere-plan : la requete SSH/WinRM peut
+    # depasser largement le timeout du Router OpenShift (30s par defaut),
+    # donc on repond tout de suite et on notifie le resultat par websocket.
+    threading.Thread(
+        target=_deployer_en_arriere_plan,
+        args=(nom, ip, os_cible, login, mot_de_passe, url_ingest),
+        daemon=True,
+    ).start()
+
+    return jsonify({"succes": True, "en_cours": True,
+                     "message": f"Deploiement de « {nom} » demarre — ca peut prendre jusqu'a une minute."})
+
+
+def _deployer_en_arriere_plan(nom, ip, os_cible, login, mot_de_passe, url_ingest):
     try:
         if os_cible == "linux":
             deployer_linux(ip, login, mot_de_passe, AGENT_LOCAL_DEFAUT, nom, url_ingest, CLE_API)
         else:
             deployer_windows(ip, login, mot_de_passe, AGENT_LOCAL_DEFAUT, nom, url_ingest, CLE_API)
-        return jsonify({
-            "succes": True,
-            "message": f"« {nom} » a ete installe et demarre sur {ip}. "
-                       f"Il apparaitra dans la liste des serveurs sous quelques secondes.",
-        })
+        resultat = {"succes": True, "nom": nom,
+                    "message": f"« {nom} » a ete installe et demarre sur {ip}."}
     except Exception as e:
-        return jsonify({"succes": False, "erreur": _message_erreur_deploiement(e, os_cible)}), 502
-
+        resultat = {"succes": False, "nom": nom,
+                    "erreur": _message_erreur_deploiement(e, os_cible)}
+    socketio.emit("deploiement_resultat", resultat, room="admins")
 
 @app.route("/")
 @login_required
