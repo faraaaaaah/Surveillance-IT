@@ -1745,29 +1745,55 @@ async function soumettreDeploiement(ev){
       headers: {'Content-Type': 'application/json'},
       body: JSON.stringify(payload),
     });
-    const data = await res.json().catch(() => ({}));
+    const data = await res.json();
 
-    if(res.ok && data.succes){
-      resultat.className = 'ok';
-      resultat.textContent = '✅ ' + data.message;
+    if (res.ok && data.en_cours) {
+      // Cette reponse ne confirme QUE le demarrage du deploiement : le
+      // resultat definitif (succes ou echec du SSH/WinRM, qui peut prendre
+      // jusqu'a une minute) arrive plus tard via l'evenement socket.io
+      // "deploiement_resultat" (cf. handler plus bas). On ne ferme donc
+      // pas la modale ni ne reactive le bouton ici.
+      resultat.className = '';
+      resultat.textContent = '⏳ ' + data.message;
       document.getElementById('form-deploiement').reset();
-      // La machine apparaitra automatiquement dans la sidebar des qu'elle
-      // enverra sa premiere mesure (evenement socket.io "maj_serveur") —
-      // pas besoin de rafraichir manuellement la liste ici.
-      setTimeout(fermerDeploiement, 3000);
-    } else {
-      resultat.className = 'err';
-      resultat.textContent = '❌ ' + (data.erreur || 'Échec du déploiement, sans détail disponible.');
+      return;
     }
+
+    // Erreur de validation immediate (champs manquants, nom deja pris,
+    // pas admin) : la requete est terminee, rien d'autre n'arrivera.
+    resultat.className = 'err';
+    resultat.textContent = '❌ ' + (data.erreur || 'Échec du déploiement, sans détail disponible.');
   } catch(err){
     resultat.className = 'err';
     resultat.textContent = '❌ Impossible de contacter le dashboard (connexion réseau interrompue).';
     console.error('Erreur deploiement:', err);
-  } finally {
-    bouton.disabled = false;
-    bouton.textContent = texteInitial;
   }
+  bouton.disabled = false;
+  bouton.textContent = texteInitial;
 }
+
+// Resultat definitif du deploiement en arriere-plan (voir _deployer_en_arriere_plan
+// cote serveur) : arrive bien apres la reponse HTTP du POST /api/deployer,
+// potentiellement jusqu'a une minute plus tard.
+socket.on('deploiement_resultat', data => {
+  const resultat = document.getElementById('resultat-deploiement');
+  const bouton = document.getElementById('btn-deployer-submit');
+  if(!resultat || !bouton) return;   // modale fermee entre-temps
+
+  if(data.succes){
+    resultat.className = 'ok';
+    resultat.textContent = '✅ ' + data.message;
+    // La machine apparaitra automatiquement dans la sidebar des qu'elle
+    // enverra sa premiere mesure (evenement socket.io "maj_serveur") —
+    // pas besoin de rafraichir manuellement la liste ici.
+    setTimeout(fermerDeploiement, 3000);
+  } else {
+    resultat.className = 'err';
+    resultat.textContent = `❌ « ${data.nom} » : ` + data.erreur;
+  }
+  bouton.disabled = false;
+  bouton.textContent = 'Ajouter et déployer';
+});
 
 // --- Bouton Rapport (PDF a la demande) ---------------------------------
 function toggleMenuRapport(){
