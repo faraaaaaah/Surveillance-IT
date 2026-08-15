@@ -16,6 +16,7 @@ Puis ouvre : http://localhost:5000
 Pour connecter un agent distant, voir agent.py.
 """
 
+import ipaddress
 import os
 import threading
 import time
@@ -564,6 +565,31 @@ def api_deployer():
         return jsonify({"succes": False, "erreur": "Merci de remplir tous les champs."}), 400
     if nom in _etat_serveurs:
         return jsonify({"succes": False, "erreur": f"Un serveur nomme « {nom} » existe deja."}), 400
+
+    # Ce dashboard tourne sur OpenShift (cloud) : il n'a PAS de route reseau
+    # vers le reseau local de l'entreprise (192.168.x.x, 10.x.x.x, etc.)
+    # sans VPN. Toute tentative de SSH/WinRM vers une IP privee depuis ici
+    # est vouee a l'echec (et reste bloquee jusqu'au timeout reseau en
+    # consommant un thread pour rien). C'est exactement pour ce cas que
+    # deploiement_ui.py existe : a lancer sur un PC deja present sur le
+    # reseau local. On bloque donc ce cas ici plutot que de laisser le
+    # thread en arriere-plan tenter une connexion vouee a l'echec.
+    try:
+        ip_valide = ipaddress.ip_address(ip)
+        est_privee = ip_valide.is_private or ip_valide.is_loopback or ip_valide.is_link_local
+    except ValueError:
+        est_privee = False  # nom d'hote / IP mal formee : laisse deployer_* renvoyer l'erreur detaillee
+
+    if est_privee:
+        return jsonify({
+            "succes": False,
+            "erreur": (
+                f"{ip} est une adresse IP privee, injoignable depuis ce dashboard cloud "
+                f"(pas de route reseau vers votre reseau local sans VPN). Utilisez plutot "
+                f"deploiement_ui.py sur un PC deja present sur ce reseau local pour deployer "
+                f"vers cette machine."
+            ),
+        }), 400
 
     url_ingest = request.url_root.rstrip("/") + "/api/ingest"
 
