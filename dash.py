@@ -16,7 +16,6 @@ Puis ouvre : http://localhost:5000
 Pour connecter un agent distant, voir agent.py.
 """
 
-import ipaddress
 import os
 import threading
 import time
@@ -46,7 +45,7 @@ from base_connaissances import base_connaissances_bp
 import provisionnement
 from provisionnement import provisionnement_bp
 from flask_socketio import join_room, emit as socketio_emit_local
-from deploiement_distant import deployer_linux, deployer_windows, AGENT_LOCAL_DEFAUT
+import deploiement_jobs
 
 app = Flask(__name__)
 # Cle de session generee et sauvegardee automatiquement (voir auth.py) : pas
@@ -84,6 +83,13 @@ notifier.definir_source_metriques(lambda: (_etat_serveurs.get("Serveur-Dashboard
 # Cle partagee entre le dashboard et les agents distants (agent.py).
 # A CHANGER en production : export DASHBOARD_API_KEY="quelque-chose-de-solide"
 CLE_API = os.environ.get("DASHBOARD_API_KEY", "cle-demo-a-changer")
+# Jeton partage pour securiser les endpoints du relais de deploiement
+# (/api/deployer/jobs et /api/deployer/resultat) : seul le script
+# relais_deploiement.py, configure avec ce meme jeton, peut recuperer les
+# jobs en attente (qui contiennent temporairement un mot de passe) ou
+# rapporter un resultat. Sans ca, n'importe qui connaissant l'URL pourrait
+# intercepter des identifiants en attente de traitement.
+RELAIS_TOKEN = os.environ.get("RELAIS_TOKEN", "relais-token-a-changer")
 
 HISTORIQUE_MAX_POINTS = 120  # 120 x 5s = 10 minutes de courbe glissante
 
@@ -512,45 +518,13 @@ def api_chat():
     return jsonify({"reponse": reponse})
 
 
-def _message_erreur_deploiement(exc: Exception, os_cible: str) -> str:
-    """Traduit une exception technique (SSH/WinRM/reseau) en message clair,
-    affichable directement dans le formulaire d'ajout de serveur. Les
-    RuntimeError levees par deploiement_distant.py sont deja redigees a la
-    main pour etre lisibles -> on les garde telles quelles. Les autres
-    (timeouts reseau, erreurs paramiko/winrm brutes) sont traduites ici."""
-    texte = str(exc)
-    bas = texte.lower()
-
-    if "timed out" in bas or "timeout" in bas:
-        if os_cible == "windows":
-            return ("Impossible de joindre cette machine sur le port WinRM (5985). "
-                     "Verifiez qu'elle est allumee, sur le meme reseau, et que WinRM "
-                     "est active dessus (Enable-PSRemoting -Force en PowerShell administrateur).")
-        return ("Impossible de joindre cette machine sur le port SSH (22). "
-                 "Verifiez qu'elle est allumee, sur le meme reseau, et que le service SSH est actif.")
-
-    if "connection refused" in bas or "actively refused" in bas:
-        service = "WinRM" if os_cible == "windows" else "SSH"
-        return f"La machine a refuse la connexion {service} — le service {service} n'est probablement pas actif dessus."
-
-    if "authentication" in bas or "access is denied" in bas or "auth failed" in bas or " 401" in bas:
-        return "Identifiant ou mot de passe incorrect pour cette machine."
-
-    if "getaddrinfo failed" in bas or "name or service not known" in bas or "no address associated" in bas:
-        return "Adresse IP introuvable ou invalide."
-
-    if "paramiko n'est pas installe" in bas or "pywinrm n'est pas installe" in bas:
-        return "Composant technique manquant cote serveur du dashboard — contactez l'administrateur systeme."
-
-    if isinstance(exc, RuntimeError):
-        return texte
-
-    return f"Le deploiement a echoue de facon inattendue : {texte[:200]}"
-
-
 @app.route("/api/deployer", methods=["POST"])
 @login_required
 def api_deployer():
+    # Reserve aux comptes admin (meme critere que le badge de role et que
+    # admin_required dans auth.py) : installer un agent sur une machine
+    # tierce avec des identifiants admin n'a pas a etre accessible aux
+    # comptes non-admin, independamment de leurs restrictions de machines.
     if not current_user.is_admin:
         return jsonify({"succes": False, "erreur": "Reserve aux administrateurs."}), 403
 
@@ -566,58 +540,63 @@ def api_deployer():
     if nom in _etat_serveurs:
         return jsonify({"succes": False, "erreur": f"Un serveur nomme « {nom} » existe deja."}), 400
 
-    # Ce dashboard tourne sur OpenShift (cloud) : il n'a PAS de route reseau
-    # vers le reseau local de l'entreprise (192.168.x.x, 10.x.x.x, etc.)
-    # sans VPN. Toute tentative de SSH/WinRM vers une IP privee depuis ici
-    # est vouee a l'echec (et reste bloquee jusqu'au timeout reseau en
-    # consommant un thread pour rien). C'est exactement pour ce cas que
-    # deploiement_ui.py existe : a lancer sur un PC deja present sur le
-    # reseau local. On bloque donc ce cas ici plutot que de laisser le
-    # thread en arriere-plan tenter une connexion vouee a l'echec.
-    try:
-        ip_valide = ipaddress.ip_address(ip)
-        est_privee = ip_valide.is_private or ip_valide.is_loopback or ip_valide.is_link_local
-    except ValueError:
-        est_privee = False  # nom d'hote / IP mal formee : laisse deployer_* renvoyer l'erreur detaillee
-
-    if est_privee:
-        return jsonify({
-            "succes": False,
-            "erreur": (
-                f"{ip} est une adresse IP privee, injoignable depuis ce dashboard cloud "
-                f"(pas de route reseau vers votre reseau local sans VPN). Utilisez plutot "
-                f"deploiement_ui.py sur un PC deja present sur ce reseau local pour deployer "
-                f"vers cette machine."
-            ),
-        }), 400
-
+    # Le dashboard cloud ne peut pas joindre directement une machine sur le
+    # reseau local de l'entreprise (pas de route reseau sans VPN) - on
+    # depose donc une tache dans une file d'attente, recuperee par un
+    # relais local (relais_deploiement.py) tournant sur un PC deja present
+    # sur ce reseau, qui l'executera et rapportera le resultat.
     url_ingest = request.url_root.rstrip("/") + "/api/ingest"
+    job_id = deploiement_jobs.creer_job(nom, ip, os_cible, login, mot_de_passe, url_ingest, CLE_API)
 
-    # On lance le deploiement en arriere-plan : la requete SSH/WinRM peut
-    # depasser largement le timeout du Router OpenShift (30s par defaut),
-    # donc on repond tout de suite et on notifie le resultat par websocket.
-    threading.Thread(
-        target=_deployer_en_arriere_plan,
-        args=(nom, ip, os_cible, login, mot_de_passe, url_ingest),
-        daemon=True,
-    ).start()
-
-    return jsonify({"succes": True, "en_cours": True,
-                     "message": f"Deploiement de « {nom} » demarre — ca peut prendre jusqu'a une minute."})
+    return jsonify({
+        "succes": True,
+        "job_id": job_id,
+        "message": "Tâche déposée, en attente du relais local...",
+    })
 
 
-def _deployer_en_arriere_plan(nom, ip, os_cible, login, mot_de_passe, url_ingest):
-    try:
-        if os_cible == "linux":
-            deployer_linux(ip, login, mot_de_passe, AGENT_LOCAL_DEFAUT, nom, url_ingest, CLE_API)
-        else:
-            deployer_windows(ip, login, mot_de_passe, AGENT_LOCAL_DEFAUT, nom, url_ingest, CLE_API)
-        resultat = {"succes": True, "nom": nom,
-                    "message": f"« {nom} » a ete installe et demarre sur {ip}."}
-    except Exception as e:
-        resultat = {"succes": False, "nom": nom,
-                    "erreur": _message_erreur_deploiement(e, os_cible)}
-    socketio.emit("deploiement_resultat", resultat, room="admins")
+@app.route("/api/deployer/jobs", methods=["GET"])
+def api_deployer_jobs():
+    """Interroge par le relais local (relais_deploiement.py) pour recuperer
+    les taches de deploiement en attente. Protege par un jeton partage
+    (pas par session utilisateur, car le relais n'est pas un navigateur) -
+    voir RELAIS_TOKEN."""
+    if request.headers.get("X-RELAIS-TOKEN") != RELAIS_TOKEN:
+        return jsonify({"erreur": "Jeton invalide."}), 403
+    jobs = deploiement_jobs.recuperer_jobs_en_attente()
+    return jsonify({"jobs": jobs})
+
+
+@app.route("/api/deployer/resultat", methods=["POST"])
+def api_deployer_resultat():
+    """Rapport du relais local apres tentative de deploiement (succes ou
+    echec)."""
+    if request.headers.get("X-RELAIS-TOKEN") != RELAIS_TOKEN:
+        return jsonify({"erreur": "Jeton invalide."}), 403
+    data = request.get_json(force=True, silent=True) or {}
+    job_id = data.get("job_id")
+    succes = bool(data.get("succes"))
+    message = data.get("message", "")
+    if not job_id:
+        return jsonify({"erreur": "job_id manquant."}), 400
+    deploiement_jobs.marquer_resultat(job_id, succes, message)
+    return jsonify({"ok": True})
+
+
+@app.route("/api/deployer/statut/<job_id>", methods=["GET"])
+@login_required
+def api_deployer_statut(job_id):
+    """Interroge par le navigateur de l'admin (polling) pour suivre l'etat
+    d'une tache de deploiement en cours."""
+    job = deploiement_jobs.obtenir_statut(job_id)
+    if not job:
+        return jsonify({"trouve": False}), 404
+    return jsonify({
+        "trouve": True,
+        "statut": job["statut"],
+        "message": job.get("message"),
+    })
+
 
 @app.route("/")
 @login_required
@@ -1753,7 +1732,7 @@ async function soumettreDeploiement(ev){
   const resultat = document.getElementById('resultat-deploiement');
   const texteInitial = bouton.textContent;
   bouton.disabled = true;
-  bouton.textContent = 'Déploiement en cours...';
+  bouton.textContent = 'Envoi de la demande...';
   resultat.className = '';
   resultat.textContent = '';
 
@@ -1771,55 +1750,70 @@ async function soumettreDeploiement(ev){
       headers: {'Content-Type': 'application/json'},
       body: JSON.stringify(payload),
     });
-    const data = await res.json();
+    const data = await res.json().catch(() => ({}));
 
-    if (res.ok && data.en_cours) {
-      // Cette reponse ne confirme QUE le demarrage du deploiement : le
-      // resultat definitif (succes ou echec du SSH/WinRM, qui peut prendre
-      // jusqu'a une minute) arrive plus tard via l'evenement socket.io
-      // "deploiement_resultat" (cf. handler plus bas). On ne ferme donc
-      // pas la modale ni ne reactive le bouton ici.
+    if(res.ok && data.succes && data.job_id){
+      // La tache est deposee : le dashboard cloud ne peut pas joindre
+      // directement la machine (reseau d'entreprise, pas de VPN) - un
+      // relais local va la recuperer et l'executer. On interroge le
+      // statut periodiquement jusqu'a ce qu'il soit termine.
+      bouton.textContent = 'En attente du relais local...';
       resultat.className = '';
-      resultat.textContent = '⏳ ' + data.message;
-      document.getElementById('form-deploiement').reset();
-      return;
+      resultat.textContent = '⏳ Tâche déposée, en attente du relais local (peut prendre jusqu\'à 30s)...';
+      await suivreDeploiement(data.job_id, resultat, bouton, texteInitial);
+    } else {
+      resultat.className = 'err';
+      resultat.textContent = '❌ ' + (data.erreur || 'Échec du dépôt de la demande, sans détail disponible.');
+      bouton.disabled = false;
+      bouton.textContent = texteInitial;
     }
-
-    // Erreur de validation immediate (champs manquants, nom deja pris,
-    // pas admin) : la requete est terminee, rien d'autre n'arrivera.
-    resultat.className = 'err';
-    resultat.textContent = '❌ ' + (data.erreur || 'Échec du déploiement, sans détail disponible.');
   } catch(err){
     resultat.className = 'err';
     resultat.textContent = '❌ Impossible de contacter le dashboard (connexion réseau interrompue).';
     console.error('Erreur deploiement:', err);
+    bouton.disabled = false;
+    bouton.textContent = texteInitial;
   }
+}
+
+async function suivreDeploiement(jobId, resultat, bouton, texteInitial){
+  const debut = Date.now();
+  const delaiMaxMs = 3 * 60 * 1000; // 3 minutes : au-dela, on suppose le relais hors-ligne
+
+  while(Date.now() - debut < delaiMaxMs){
+    await new Promise(r => setTimeout(r, 3000));
+    try{
+      const res = await fetch('/api/deployer/statut/' + jobId);
+      const data = await res.json().catch(() => ({}));
+
+      if(data.trouve && data.statut === 'succes'){
+        resultat.className = 'ok';
+        resultat.textContent = '✅ ' + (data.message || 'Déploiement réussi.');
+        document.getElementById('form-deploiement').reset();
+        setTimeout(fermerDeploiement, 3000);
+        bouton.disabled = false;
+        bouton.textContent = texteInitial;
+        return;
+      }
+      if(data.trouve && data.statut === 'echec'){
+        resultat.className = 'err';
+        resultat.textContent = '❌ ' + (data.message || 'Échec du déploiement.');
+        bouton.disabled = false;
+        bouton.textContent = texteInitial;
+        return;
+      }
+      // sinon : toujours 'en_attente' ou 'en_cours', on continue a sonder
+    } catch(err){
+      console.error('Erreur suivi deploiement:', err);
+    }
+  }
+
+  resultat.className = 'err';
+  resultat.textContent = '❌ Aucune réponse du relais local après 3 minutes. '
+    + 'Vérifiez que relais_deploiement.py tourne bien sur un PC connecté au réseau de l\'entreprise.';
   bouton.disabled = false;
   bouton.textContent = texteInitial;
 }
-
-// Resultat definitif du deploiement en arriere-plan (voir _deployer_en_arriere_plan
-// cote serveur) : arrive bien apres la reponse HTTP du POST /api/deployer,
-// potentiellement jusqu'a une minute plus tard.
-socket.on('deploiement_resultat', data => {
-  const resultat = document.getElementById('resultat-deploiement');
-  const bouton = document.getElementById('btn-deployer-submit');
-  if(!resultat || !bouton) return;   // modale fermee entre-temps
-
-  if(data.succes){
-    resultat.className = 'ok';
-    resultat.textContent = '✅ ' + data.message;
-    // La machine apparaitra automatiquement dans la sidebar des qu'elle
-    // enverra sa premiere mesure (evenement socket.io "maj_serveur") —
-    // pas besoin de rafraichir manuellement la liste ici.
-    setTimeout(fermerDeploiement, 3000);
-  } else {
-    resultat.className = 'err';
-    resultat.textContent = `❌ « ${data.nom} » : ` + data.erreur;
-  }
-  bouton.disabled = false;
-  bouton.textContent = 'Ajouter et déployer';
-});
 
 // --- Bouton Rapport (PDF a la demande) ---------------------------------
 function toggleMenuRapport(){
