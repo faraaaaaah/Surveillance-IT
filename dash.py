@@ -1759,7 +1759,7 @@ async function soumettreDeploiement(ev){
       // statut periodiquement jusqu'a ce qu'il soit termine.
       bouton.textContent = 'En attente du relais local...';
       resultat.className = '';
-      resultat.textContent = '⏳ Tâche déposée, en attente du relais local (peut prendre jusqu\'à 30s)...';
+      resultat.textContent = "⏳ Tâche déposée, en attente du relais local (peut prendre jusqu'à 30s)...";
       await suivreDeploiement(data.job_id, resultat, bouton, texteInitial);
     } else {
       resultat.className = 'err';
@@ -1810,7 +1810,7 @@ async function suivreDeploiement(jobId, resultat, bouton, texteInitial){
 
   resultat.className = 'err';
   resultat.textContent = '❌ Aucune réponse du relais local après 3 minutes. '
-    + 'Vérifiez que relais_deploiement.py tourne bien sur un PC connecté au réseau de l\'entreprise.';
+    + "Vérifiez que relais_deploiement.py tourne bien sur un PC connecté au réseau de l'entreprise.";
   bouton.disabled = false;
   bouton.textContent = texteInitial;
 }
