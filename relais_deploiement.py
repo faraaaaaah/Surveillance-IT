@@ -50,7 +50,7 @@ except ImportError as e:
     sys.exit(1)
 
 # --- A adapter une fois pour toutes ---
-DASHBOARD_URL = "https://surveillance-dash-tls-farah-boubaker-dev.apps.rm2.thpm.p1.openshiftapps.com"
+DASHBOARD_URL = "https://surveillance-dash-farah-boubaker-dev.apps.rm2.thpm.p1.openshiftapps.com"
 RELAIS_TOKEN = "relais-token-a-changer"
 
 INTERVALLE_SONDAGE_SECONDES = 5
