@@ -69,7 +69,11 @@ def _proteger_routes():
     # /api/ingest reste protegee par CLE_API (machine-a-machine, pas de
     # session utilisateur possible pour un agent distant) : on la laisse
     # passer ici, sa propre verification de cle est faite dans la route.
-    if request.endpoint == "api_ingest":
+    # /api/deployer/jobs et /api/deployer/resultat sont elles aussi
+    # machine-a-machine (interrogees par relais_deploiement.py, sans
+    # session navigateur) : protegees par X-RELAIS-TOKEN dans la route
+    # elle-meme, pas par l'authentification par session.
+    if request.endpoint in ("api_ingest", "api_deployer_jobs", "api_deployer_resultat"):
         return None
     return auth.verifier_acces()
 
