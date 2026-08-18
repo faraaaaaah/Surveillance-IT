@@ -178,7 +178,7 @@ def deployer_windows(ip, utilisateur, mot_de_passe, agent_local, nom_serveur, ur
         raise RuntimeError("pywinrm n'est pas installe. Lance : pip install pywinrm")
 
     print(f"[deploiement] Connexion WinRM a {ip}...")
-    session = winrm.Session(ip, auth=(utilisateur, mot_de_passe), transport="basic")
+    session = winrm.Session(ip, auth=(utilisateur, mot_de_passe), transport="ntlm")
 
     def executer_ps(script_ps):
         resultat = session.run_ps(script_ps)
@@ -231,6 +231,63 @@ $fs.Close()
         if code != 0:
             raise RuntimeError(f"Echec de la copie de l'agent (bloc {i}/{len(blocs)}) : {erreur}")
         print(f"[deploiement]   bloc {i}/{len(blocs)} transfere.")
+
+    print("[deploiement] Attribution du droit 'ouvrir une session en tant que tache automatisee' "
+          "(necessaire pour que la tache planifiee tourne avec identifiants stockes)...")
+    # Sans ce droit (SeBatchLogonRight), la tache planifiee est bien CREEE
+    # mais echoue au lancement avec l'erreur Windows 0x800710E0
+    # ("l'operateur ou l'administrateur a refuse la demande") - observe en
+    # pratique : ca fonctionne quand la tache est creee EN LOCAL sur la
+    # machine (schtasks a alors le mot de passe en clair et peut l'associer
+    # correctement au compte), mais pas via WinRM sans ce droit prealable.
+    script_droit_batch = f"""
+$code = @'
+using System;
+using System.Runtime.InteropServices;
+public class LsaHelper {{
+    [DllImport("advapi32.dll", SetLastError = true)]
+    static extern uint LsaOpenPolicy(ref LSA_UNICODE_STRING SystemName, ref LSA_OBJECT_ATTRIBUTES ObjectAttributes, int DesiredAccess, out IntPtr PolicyHandle);
+    [DllImport("advapi32.dll", SetLastError = true)]
+    static extern uint LsaAddAccountRights(IntPtr PolicyHandle, byte[] AccountSid, LSA_UNICODE_STRING[] UserRights, uint CountOfRights);
+    [DllImport("advapi32.dll")]
+    static extern uint LsaClose(IntPtr ObjectHandle);
+    [StructLayout(LayoutKind.Sequential)]
+    struct LSA_UNICODE_STRING {{ public ushort Length; public ushort MaximumLength; public IntPtr Buffer; }}
+    [StructLayout(LayoutKind.Sequential)]
+    struct LSA_OBJECT_ATTRIBUTES {{ public int Length; public IntPtr RootDirectory; public IntPtr ObjectName; public int Attributes; public IntPtr SecurityDescriptor; public IntPtr SecurityQualityOfService; }}
+    static LSA_UNICODE_STRING InitLsaString(string s) {{
+        var lus = new LSA_UNICODE_STRING();
+        if (s == null) s = "";
+        lus.Buffer = Marshal.StringToHGlobalUni(s);
+        lus.Length = (ushort)(s.Length * 2);
+        lus.MaximumLength = (ushort)((s.Length + 1) * 2);
+        return lus;
+    }}
+    public static void AjouterDroit(string compte, string droit) {{
+        var sid = new System.Security.Principal.NTAccount(compte).Translate(typeof(System.Security.Principal.SecurityIdentifier)) as System.Security.Principal.SecurityIdentifier;
+        byte[] sidBytes = new byte[sid.BinaryLength];
+        sid.GetBinaryForm(sidBytes, 0);
+        LSA_OBJECT_ATTRIBUTES oa = new LSA_OBJECT_ATTRIBUTES();
+        LSA_UNICODE_STRING systemName = InitLsaString(null);
+        IntPtr policyHandle;
+        uint res = LsaOpenPolicy(ref systemName, ref oa, 0x00000800, out policyHandle);
+        if (res != 0) throw new Exception("LsaOpenPolicy a echoue, code " + res);
+        LSA_UNICODE_STRING[] rights = new LSA_UNICODE_STRING[1];
+        rights[0] = InitLsaString(droit);
+        res = LsaAddAccountRights(policyHandle, sidBytes, rights, 1);
+        LsaClose(policyHandle);
+        if (res != 0) throw new Exception("LsaAddAccountRights a echoue, code " + res);
+    }}
+}}
+'@
+Add-Type -TypeDefinition $code -Language CSharp
+[LsaHelper]::AjouterDroit("{utilisateur}", "SeBatchLogonRight")
+Write-Output "OK"
+"""
+    code, sortie, erreur = executer_ps(script_droit_batch)
+    if code != 0:
+        raise RuntimeError(f"Echec de l'attribution du droit batch logon : {erreur}")
+    print("[deploiement] Droit attribue.")
 
     print("[deploiement] Creation de la tache planifiee (demarrage automatique)...")
     nom_tache = "AgentSurveillance"
