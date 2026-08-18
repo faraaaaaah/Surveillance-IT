@@ -178,7 +178,7 @@ def deployer_windows(ip, utilisateur, mot_de_passe, agent_local, nom_serveur, ur
         raise RuntimeError("pywinrm n'est pas installe. Lance : pip install pywinrm")
 
     print(f"[deploiement] Connexion WinRM a {ip}...")
-    session = winrm.Session(ip, auth=(utilisateur, mot_de_passe), transport="ntlm")
+    session = winrm.Session(ip, auth=(utilisateur, mot_de_passe), transport="basic")
 
     def executer_ps(script_ps):
         resultat = session.run_ps(script_ps)
