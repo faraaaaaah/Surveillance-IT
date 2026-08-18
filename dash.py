@@ -157,8 +157,7 @@ def traiter_mesure(serveur: str, m: dict, anomalies: list, explication: str = No
         etat["courbe"].append(_point_courbe(m))
         explication_actuelle = etat["explication"]
 
-    if not anomalies:
-        historique.enregistrer_serveur_vu(serveur)
+    historique.enregistrer_serveur_vu(serveur)
     historique.enregistrer_mesure(serveur, m)  # historique long terme (downsample 1/min), rapide
 
     # Fait passer les incidents 'ouvert' dont la metrique est revenue a la
