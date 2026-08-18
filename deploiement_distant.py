@@ -264,11 +264,9 @@ $settings = New-ScheduledTaskSettingsSet `
     -DontStopOnIdleEnd `
     -StartWhenAvailable
 
-$principal = New-ScheduledTaskPrincipal -UserId "{utilisateur}" -LogonType Password -RunLevel Highest
-
 Unregister-ScheduledTask -TaskName "{nom_tache}" -Confirm:$false -ErrorAction SilentlyContinue
 
-Register-ScheduledTask -TaskName "{nom_tache}" -Action $action -Trigger @($triggerDemarrage, $triggerSecours) -Settings $settings -Principal $principal -Password '{mot_de_passe}' -Force
+Register-ScheduledTask -TaskName "{nom_tache}" -Action $action -Trigger @($triggerDemarrage, $triggerSecours) -Settings $settings -User "{utilisateur}" -Password '{mot_de_passe}' -RunLevel Highest -Force
 
 Start-ScheduledTask -TaskName "{nom_tache}"
 """
