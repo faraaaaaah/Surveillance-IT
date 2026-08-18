@@ -232,43 +232,12 @@ $fs.Close()
             raise RuntimeError(f"Echec de la copie de l'agent (bloc {i}/{len(blocs)}) : {erreur}")
         print(f"[deploiement]   bloc {i}/{len(blocs)} transfere.")
 
-    print("[deploiement] Creation de la tache planifiee (demarrage automatique, resiliente)...")
+    print("[deploiement] Creation de la tache planifiee (demarrage automatique)...")
     nom_tache = "AgentSurveillance"
-    # IMPORTANT : on utilise Register-ScheduledTask (pas schtasks /Create brut)
-    # pour pouvoir fixer explicitement ExecutionTimeLimit a illimite et une
-    # politique de redemarrage automatique. Sans ca, schtasks applique des
-    # valeurs par defaut qui finissent par tuer l'agent au bout d'un moment
-    # (observe en pratique : le processus s'arrete proprement, code 0, sans
-    # qu'aucune erreur n'apparaisse cote agent - Windows le termine juste).
-    #
-    # Deux declencheurs :
-    #   - AtStartup : lancement normal au demarrage de la machine.
-    #   - Repetition toutes les 5 min, indefiniment : filet de securite.
-    #     Grace a MultipleInstances=IgnoreNew ci-dessous, si l'agent tourne
-    #     deja ce declencheur ne fait rien ; si l'agent s'est arrete pour
-    #     une raison quelconque, il est relance sous 5 min max, sans
-    #     attendre un redemarrage complet de la machine.
+    commande_agent = f'python "{chemin_distant}" --nom {nom_serveur} --url {url_ingest} --cle {cle_api}'
     script_tache = f"""
-$action = New-ScheduledTaskAction -Execute "python" -Argument '"{chemin_distant}" --nom {nom_serveur} --url {url_ingest} --cle {cle_api}'
-
-$triggerDemarrage = New-ScheduledTaskTrigger -AtStartup
-$triggerSecours = New-ScheduledTaskTrigger -Once -At (Get-Date) -RepetitionInterval (New-TimeSpan -Minutes 5) -RepetitionDuration ([TimeSpan]::MaxValue)
-
-$settings = New-ScheduledTaskSettingsSet `
-    -ExecutionTimeLimit ([TimeSpan]::Zero) `
-    -MultipleInstances IgnoreNew `
-    -RestartCount 3 `
-    -RestartInterval (New-TimeSpan -Minutes 1) `
-    -AllowStartIfOnBatteries `
-    -DontStopIfGoingOnBatteries `
-    -DontStopOnIdleEnd `
-    -StartWhenAvailable
-
-Unregister-ScheduledTask -TaskName "{nom_tache}" -Confirm:$false -ErrorAction SilentlyContinue
-
-Register-ScheduledTask -TaskName "{nom_tache}" -Action $action -Trigger @($triggerDemarrage, $triggerSecours) -Settings $settings -User "{utilisateur}" -Password '{mot_de_passe}' -RunLevel Highest -Force
-
-Start-ScheduledTask -TaskName "{nom_tache}"
+schtasks /Create /TN "{nom_tache}" /TR '{commande_agent}' /SC ONSTART /RU "{utilisateur}" /RP "{mot_de_passe}" /F
+schtasks /Run /TN "{nom_tache}"
 """
     code, sortie, erreur = executer_ps(script_tache)
     if code != 0:
