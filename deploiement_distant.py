@@ -192,6 +192,13 @@ def deployer_windows(ip, utilisateur, mot_de_passe, agent_local, nom_serveur, ur
                   f"l'installation automatique de Python via WinRM n'est pas geree par ce script.")
     print(f"[deploiement] {sortie.strip()} trouve.")
 
+    # Win32_Process.Create tourne sans PATH : on recupere le chemin absolu
+    # de python.exe maintenant (pendant qu'on est dans une session PowerShell
+    # qui, elle, a le PATH) pour l'utiliser dans la commande de lancement immediat.
+    code_py, chemin_python, _ = executer_ps("(Get-Command python).Source")
+    chemin_python = chemin_python.strip() if (code_py == 0 and chemin_python.strip()) else "python"
+    print(f"[deploiement] Chemin Python resolu : {chemin_python}")
+
     print("[deploiement] Installation des dependances (psutil, requests)...")
     code, sortie, erreur = executer_ps("pip install psutil requests")
     if code != 0:
@@ -291,7 +298,9 @@ Write-Output "OK"
 
     print("[deploiement] Creation de la tache planifiee (demarrage automatique)...")
     nom_tache = "AgentSurveillance"
-    commande_agent = f'python "{chemin_distant}" --nom {nom_serveur} --url {url_ingest} --cle {cle_api}'
+    # On utilise le chemin absolu de python.exe (resolu plus haut) pour que
+    # Win32_Process.Create et schtasks trouvent l'executable meme sans PATH.
+    commande_agent = f'"{chemin_python}" "{chemin_distant}" --nom {nom_serveur} --url {url_ingest} --cle {cle_api}'
     script_tache = f"""
 schtasks /Create /TN "{nom_tache}" /TR '{commande_agent}' /SC ONSTART /RU "{utilisateur}" /RP "{mot_de_passe}" /F
 """
