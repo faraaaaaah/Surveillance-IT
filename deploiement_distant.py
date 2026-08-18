@@ -294,11 +294,35 @@ Write-Output "OK"
     commande_agent = f'python "{chemin_distant}" --nom {nom_serveur} --url {url_ingest} --cle {cle_api}'
     script_tache = f"""
 schtasks /Create /TN "{nom_tache}" /TR '{commande_agent}' /SC ONSTART /RU "{utilisateur}" /RP "{mot_de_passe}" /F
-schtasks /Run /TN "{nom_tache}"
 """
     code, sortie, erreur = executer_ps(script_tache)
     if code != 0:
         raise RuntimeError(f"Echec de la creation de la tache planifiee : {erreur}")
+
+    # NOTE IMPORTANTE : on ne fait PAS "schtasks /Run" ici pour demarrer
+    # l'agent tout de suite. Une tache declenchee "/SC ONSTART" avec un
+    # logon par mot de passe stocke, lancee manuellement (donc hors d'un
+    # VRAI demarrage systeme), reste bloquee en etat "Queued" indefiniment
+    # - comportement observe et documente de Task Scheduler, pas un bug de
+    # ce script. La tache creee ci-dessus assurera bien le redemarrage
+    # automatique lors des PROCHAINS vrais demarrages de la machine ; mais
+    # pour un demarrage immediat maintenant, on lance le processus
+    # directement via WinRM, en le detachant du job WinRM (sinon il serait
+    # tue des la fin de cette session) grace a Win32_Process/Create plutot
+    # qu'un simple Start-Process.
+    print("[deploiement] Demarrage immediat de l'agent (sans attendre le prochain redemarrage)...")
+    script_lancement_immediat = f"""
+$res = Invoke-CimMethod -ClassName Win32_Process -MethodName Create -Arguments @{{ CommandLine = '{commande_agent}' }}
+if ($res.ReturnValue -ne 0) {{ Write-Error "Code retour Win32_Process.Create : $($res.ReturnValue)"; exit 1 }}
+Write-Output "PID agent : $($res.ProcessId)"
+"""
+    code, sortie, erreur = executer_ps(script_lancement_immediat)
+    if code != 0:
+        raise RuntimeError(
+            f"Tache planifiee creee (elle demarrera au prochain redemarrage), "
+            f"mais echec du demarrage immediat de l'agent : {erreur}"
+        )
+    print(f"[deploiement] {sortie.strip()}")
 
     print(f"[deploiement] ✅ Agent installe et demarre sur {ip} ({nom_serveur}).")
     print(f"[deploiement] Il redemarrera automatiquement avec la machine (tache planifiee '{nom_tache}').")
