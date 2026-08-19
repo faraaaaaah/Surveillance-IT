@@ -26,6 +26,11 @@ risque ?".
 
 import ollama
 from historique import contexte_pour_chatbot
+# Reutilise le meme client Ollama (deja configure via la variable
+# d'environnement OLLAMA_HOST) que monitoring_core.py, plutot que d'appeler
+# le module ollama brut ici - une seule source de verite pour l'adresse du
+# service Ollama, voir monitoring_core.py pour le detail.
+from monitoring_core import _client_ollama
 
 
 def repondre_question(question: str, serveur: str = None, jours: int = 7) -> str:
@@ -48,7 +53,7 @@ IMPORTANT :
 """
 
     try:
-        response = ollama.chat(
+        response = _client_ollama.chat(
             model="mistral",
             messages=[{"role": "user", "content": prompt}]
         )
@@ -152,7 +157,7 @@ IMPORTANT :
 """
 
     try:
-        response = ollama.chat(
+        response = _client_ollama.chat(
             model="mistral",
             messages=[{"role": "user", "content": prompt}]
         )
