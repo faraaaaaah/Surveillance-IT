@@ -152,6 +152,18 @@ def initialiser_db():
                 derniere_maj TEXT
             )
         """)
+        # Liste noire des serveurs explicitement supprimes depuis le
+        # dashboard. Sans ca, un agent encore actif sur la machine
+        # continuerait a poster ses metriques toutes les quelques secondes
+        # et recreerait le serveur juste apres sa suppression. Un serveur
+        # sur cette liste voit son ingestion ignorée jusqu'a reactivation
+        # (redeploiement reussi via le dashboard, ou reactivation manuelle).
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS serveurs_supprimes (
+                nom TEXT PRIMARY KEY,
+                supprime_le TEXT NOT NULL
+            )
+        """)
         # Voir section "Provisionnement" plus bas : une prevision = "a ce
         # rythme, ce seuil sera franchi dans environ X". On la garde en
         # base (et pas juste en memoire) pour pouvoir la confronter au
@@ -594,7 +606,11 @@ def supprimer_serveur(nom: str):
     anomalies, ses previsions, son historique de mesures, et son entree
     dans la table 'serveurs'. Irreversible - a appeler uniquement apres
     confirmation cote UI. N'echoue pas si le serveur n'a pas (encore)
-    de lignes dans certaines tables (ex: jamais de prevision)."""
+    de lignes dans certaines tables (ex: jamais de prevision).
+
+    Ajoute aussi le nom a la liste noire (voir est_supprime) : sans ca,
+    un agent encore actif sur la machine recreerait le serveur des sa
+    prochaine mesure envoyee, quelques secondes plus tard."""
     initialiser_db()
     initialiser_table_mesures()
     _execute_with_lock("DELETE FROM incidents WHERE serveur = ?", (nom,))
@@ -602,8 +618,30 @@ def supprimer_serveur(nom: str):
     _execute_with_lock("DELETE FROM previsions WHERE serveur = ?", (nom,))
     _execute_with_lock("DELETE FROM mesures WHERE serveur = ?", (nom,))
     _execute_with_lock("DELETE FROM serveurs WHERE nom = ?", (nom,))
+    _execute_with_lock(
+        "INSERT OR REPLACE INTO serveurs_supprimes (nom, supprime_le) VALUES (?, ?)",
+        (nom, maintenant_local().strftime("%Y-%m-%d %H:%M:%S")),
+    )
     with _mesure_lock:
         _dernier_enregistrement_mesure.pop(nom, None)
+
+
+def est_supprime(nom: str) -> bool:
+    """True si ce nom de serveur a ete explicitement supprime et n'a pas
+    encore ete reactive. A verifier avant de traiter une mesure entrante
+    (/api/ingest) pour empecher un agent encore actif de le faire
+    reapparaitre tout seul."""
+    initialiser_db()
+    rows = _execute_with_lock("SELECT 1 FROM serveurs_supprimes WHERE nom = ?", (nom,), fetch=True)
+    return bool(rows)
+
+
+def reactiver_serveur(nom: str):
+    """Retire un serveur de la liste noire : a appeler quand un
+    redeploiement reussi (ou une reactivation manuelle) est explicitement
+    voulu pour ce nom, pour que ses mesures recommencent a etre acceptees."""
+    initialiser_db()
+    _execute_with_lock("DELETE FROM serveurs_supprimes WHERE nom = ?", (nom,))
 
 
 # ---------------------------------------------------------------------------

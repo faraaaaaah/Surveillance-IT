@@ -335,6 +335,12 @@ def api_ingest():
     explication = data.get("explication")
     if not m:
         return jsonify({"erreur": "champ 'metriques' manquant"}), 400
+    if historique.est_supprime(serveur):
+        # Ce serveur a ete supprime depuis le dashboard, mais son agent
+        # tourne encore et continue d'envoyer des mesures - on les ignore
+        # sans erreur (pour ne pas faire boucler/crasher l'agent) plutot
+        # que de laisser le serveur reapparaitre tout seul.
+        return jsonify({"ok": True, "ignore": True})
     traiter_mesure(serveur, m, anomalies, explication)
     return jsonify({"ok": True})
 
@@ -612,6 +618,13 @@ def api_deployer_resultat():
     if not job_id:
         return jsonify({"erreur": "job_id manquant."}), 400
     deploiement_jobs.marquer_resultat(job_id, succes, message)
+    if succes:
+        # Un (re)deploiement reussi pour ce nom est une intention explicite
+        # de l'admin de faire reapparaitre ce serveur - on le retire donc
+        # de la liste noire des serveurs supprimes si besoin (no-op sinon).
+        job = deploiement_jobs.obtenir_statut(job_id)
+        if job and job.get("nom"):
+            historique.reactiver_serveur(job["nom"])
     return jsonify({"ok": True})
 
 
