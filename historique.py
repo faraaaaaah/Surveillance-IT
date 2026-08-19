@@ -589,6 +589,23 @@ def lister_serveurs():
     return [dict(r) for r in rows] if rows else []
 
 
+def supprimer_serveur(nom: str):
+    """Supprime toute trace d'un serveur de la base : ses incidents, ses
+    anomalies, ses previsions, son historique de mesures, et son entree
+    dans la table 'serveurs'. Irreversible - a appeler uniquement apres
+    confirmation cote UI. N'echoue pas si le serveur n'a pas (encore)
+    de lignes dans certaines tables (ex: jamais de prevision)."""
+    initialiser_db()
+    initialiser_table_mesures()
+    _execute_with_lock("DELETE FROM incidents WHERE serveur = ?", (nom,))
+    _execute_with_lock("DELETE FROM anomalies WHERE serveur = ?", (nom,))
+    _execute_with_lock("DELETE FROM previsions WHERE serveur = ?", (nom,))
+    _execute_with_lock("DELETE FROM mesures WHERE serveur = ?", (nom,))
+    _execute_with_lock("DELETE FROM serveurs WHERE nom = ?", (nom,))
+    with _mesure_lock:
+        _dernier_enregistrement_mesure.pop(nom, None)
+
+
 # ---------------------------------------------------------------------------
 # Historique long terme des mesures (pour les graphiques 1h/6h/24h)
 # ---------------------------------------------------------------------------

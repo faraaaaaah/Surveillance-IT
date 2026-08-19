@@ -521,6 +521,35 @@ def api_chat():
     return jsonify({"reponse": reponse})
 
 
+@app.route("/api/serveurs/<nom>", methods=["DELETE"])
+@login_required
+def api_supprimer_serveur(nom):
+    # Reserve aux admins, meme logique que /api/deployer : supprimer un
+    # serveur (et tout son historique d'incidents/mesures) est une action
+    # destructive qui ne doit pas dependre des restrictions de machines
+    # d'un compte 'user', elle doit juste etre interdite a ces comptes.
+    if not current_user.is_admin:
+        return jsonify({"succes": False, "erreur": "Reserve aux administrateurs."}), 403
+
+    with _verrou:
+        existait = nom in _etat_serveurs
+        _etat_serveurs.pop(nom, None)
+
+    historique.supprimer_serveur(nom)
+    groupes.retirer_machine_partout(nom)
+    assignations.retirer_machine_partout(nom)
+
+    if not existait:
+        # Le serveur n'etait pas dans l'etat en memoire (ex: dashboard
+        # redemarre depuis) mais on a quand meme nettoye son historique en
+        # base au cas ou - on ne renvoie pas d'erreur pour autant, le
+        # resultat souhaite (plus aucune trace de ce serveur) est atteint.
+        pass
+
+    socketio.emit("serveur_supprime", {"nom": nom})
+    return jsonify({"succes": True})
+
+
 @app.route("/api/deployer", methods=["POST"])
 @login_required
 def api_deployer():
@@ -610,6 +639,7 @@ def accueil():
                          'onclick="ouvrirDeploiement()" title="Ajouter un serveur">+</button>')
     page = PAGE_HTML.replace("<!--__BARRE_UTILISATEUR__-->", auth.render_menu_utilisateur("dashboard"))
     page = page.replace("<!--__BOUTON_AJOUT__-->", bouton_ajout)
+    page = page.replace("<!--__EST_ADMIN__-->", "true" if current_user.is_admin else "false")
     return page
 
 
@@ -675,6 +705,10 @@ PAGE_HTML = """
   .serveur-item:hover{background:var(--panel2);}
   .serveur-item.actif{background:rgba(88,166,255,.12); color:var(--accent);}
   .serveur-item .pastille{width:8px; height:8px; border-radius:50%; flex-shrink:0;}
+  .serveur-item{position:relative;}
+  .suppr-serveur{margin-left:auto; padding:0 6px; border-radius:4px; color:var(--muted); font-size:15px; line-height:18px; opacity:0; transition:opacity .12s;}
+  .serveur-item:hover .suppr-serveur{opacity:1;}
+  .suppr-serveur:hover{background:rgba(240,62,62,.15); color:#F03E3E;}
 
   main{flex:1; padding:22px 28px; max-width:1000px;}
   header{display:flex; align-items:center; justify-content:space-between; margin-bottom:18px;}
@@ -1019,6 +1053,7 @@ PAGE_HTML = """
 
 <script>
 const socket = io();
+const EST_ADMIN = <!--__EST_ADMIN__-->;
 let etatServeurs = {};
 let serveurActif = null;
 const CIRCONFERENCE = 2 * Math.PI * 26;
@@ -1293,10 +1328,32 @@ function renderSidebar(){
     const s = etatServeurs[nom].score;
     const couleur = s ? couleurScore(s.score) : '#7C8B99';
     const actif = nom === serveurActif ? 'actif' : '';
+    const boutonSuppr = EST_ADMIN
+      ? `<span class="suppr-serveur" title="Supprimer ce serveur" onclick="event.stopPropagation(); supprimerServeur('${nom}')">&times;</span>`
+      : '';
     return `<div class="serveur-item ${actif}" onclick="selectionnerServeur('${nom}')">
-              <div class="pastille" style="background:${couleur}"></div>${nom}
+              <div class="pastille" style="background:${couleur}"></div>${nom}${boutonSuppr}
             </div>`;
   }).join('');
+}
+
+function supprimerServeur(nom){
+  if(!confirm(`Supprimer « ${nom} » du dashboard ?\n\nCeci efface aussi tout son historique d'incidents et de mesures. Cette action est irreversible.`)){
+    return;
+  }
+  fetch(`/api/serveurs/${encodeURIComponent(nom)}`, { method: 'DELETE' })
+    .then(r => r.json())
+    .then(data => {
+      if(!data.succes){
+        alert(data.erreur || "Echec de la suppression.");
+        return;
+      }
+      delete etatServeurs[nom];
+      if(serveurActif === nom) serveurActif = null;
+      renderSidebar();
+      renderPrincipal();
+    })
+    .catch(() => alert("Erreur reseau lors de la suppression."));
 }
 
 function selectionnerServeur(nom){

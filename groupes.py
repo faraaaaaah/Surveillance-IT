@@ -143,6 +143,14 @@ def retirer_machine(groupe_id: int, machine: str):
     _execute("DELETE FROM groupe_machines WHERE groupe_id = ? AND machine = ?", (groupe_id, machine))
 
 
+def retirer_machine_partout(machine: str):
+    """Retire une machine de TOUS les groupes. A appeler quand un serveur
+    est supprime du dashboard, pour ne pas laisser une reference vers une
+    machine qui n'existe plus dans les groupes existants."""
+    initialiser_db()
+    _execute("DELETE FROM groupe_machines WHERE machine = ?", (machine,))
+
+
 def machines_du_groupe(groupe_id: int) -> set:
     initialiser_db()
     rows = _execute("SELECT machine FROM groupe_machines WHERE groupe_id = ?", (groupe_id,), fetch=True)

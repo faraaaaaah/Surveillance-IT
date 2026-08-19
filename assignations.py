@@ -101,6 +101,18 @@ def retirer_machine(user_id: int, machine: str):
     )
 
 
+def retirer_machine_partout(machine: str):
+    """Retire une machine de TOUTES les assignations individuelles, tous
+    utilisateurs confondus. A appeler quand un serveur est supprime du
+    dashboard, pour ne pas laisser une reference vers une machine qui
+    n'existe plus."""
+    initialiser_db()
+    _execute(
+        "DELETE FROM assignations_individuelles WHERE machine = ?",
+        (machine,),
+    )
+
+
 def machines_de_utilisateur(user_id: int) -> set:
     """Machines assignees individuellement (hors groupes) a cet utilisateur"""
     initialiser_db()
