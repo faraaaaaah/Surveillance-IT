@@ -537,6 +537,15 @@ def api_supprimer_serveur(nom):
     if not current_user.is_admin:
         return jsonify({"succes": False, "erreur": "Reserve aux administrateurs."}), 403
 
+    # Confirmation cote serveur, pas seulement cote JS : le body doit
+    # contenir EXACTEMENT le nom du serveur a supprimer. Ca protege contre
+    # un appel accidentel/automatise (ex: extension navigateur qui rejoue
+    # une requete, script, curl copie-colle avec le mauvais nom) en plus
+    # de la confirmation par saisie deja demandee dans l'interface.
+    data = request.get_json(silent=True) or {}
+    if data.get("confirmation") != nom:
+        return jsonify({"succes": False, "erreur": "Confirmation invalide."}), 400
+
     with _verrou:
         existait = nom in _etat_serveurs
         _etat_serveurs.pop(nom, None)
@@ -545,12 +554,7 @@ def api_supprimer_serveur(nom):
     groupes.retirer_machine_partout(nom)
     assignations.retirer_machine_partout(nom)
 
-    if not existait:
-        # Le serveur n'etait pas dans l'etat en memoire (ex: dashboard
-        # redemarre depuis) mais on a quand meme nettoye son historique en
-        # base au cas ou - on ne renvoie pas d'erreur pour autant, le
-        # resultat souhaite (plus aucune trace de ce serveur) est atteint.
-        pass
+    audit.consigner("suppression_serveur", cible=nom, details="existait" if existait else "deja absent de l'etat en memoire")
 
     socketio.emit("serveur_supprime", {"nom": nom})
     return jsonify({"succes": True})
@@ -1351,10 +1355,20 @@ function renderSidebar(){
 }
 
 function supprimerServeur(nom){
-  if(!confirm(`Supprimer « ${nom} » du dashboard ?\n\nCeci efface aussi tout son historique d'incidents et de mesures. Cette action est irreversible.`)){
+  const saisie = prompt(
+    `Suppression irreversible de « ${nom} » : ceci efface aussi tout son historique ` +
+    `d'incidents et de mesures.\n\nPour confirmer, tape exactement le nom du serveur ci-dessous :`
+  );
+  if(saisie === null) return;  // annule
+  if(saisie !== nom){
+    alert("Nom incorrect, suppression annulee.");
     return;
   }
-  fetch(`/api/serveurs/${encodeURIComponent(nom)}`, { method: 'DELETE' })
+  fetch(`/api/serveurs/${encodeURIComponent(nom)}`, {
+    method: 'DELETE',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ confirmation: saisie }),
+  })
     .then(r => r.json())
     .then(data => {
       if(!data.succes){
