@@ -25,6 +25,18 @@ FUSEAU_LOCAL = ZoneInfo("Africa/Tunis")
 _EXECUTOR_LLM = ThreadPoolExecutor(max_workers=6)
 DELAI_MAX_LLM_SECONDES = 6
 
+# Adresse du serveur Ollama a contacter. Sans variable d'environnement (ex:
+# en local sur un poste de dev ou Ollama tourne sur la meme machine), le
+# comportement est inchange : on vise localhost. En production (OpenShift),
+# "localhost" designerait le pod lui-meme (qui ne fait pas tourner Ollama) -
+# il faut alors definir OLLAMA_HOST vers un service Ollama joignable sur le
+# reseau (ex: http://ollama:11434 si deploye comme Service dans le meme
+# namespace). Client construit explicitement (plutot que de compter sur le
+# client global par defaut du package) pour que ce soit lisible et fiable
+# quelle que soit la version du package installee.
+OLLAMA_HOST = os.environ.get("OLLAMA_HOST", "http://localhost:11434")
+_client_ollama = ollama.Client(host=OLLAMA_HOST)
+
 # --- Chargement du modèle IA (module 2) ---
 _CHEMIN_MODELE = os.path.join(
     os.path.dirname(os.path.abspath(__file__)),
@@ -220,7 +232,7 @@ def _appeler_llm(prompt: str) -> str:
     peine de blocage : avec un pool à taille fixe, une tâche qui attend une
     sous-tâche sur le MEME pool peut se retrouver sans worker disponible)."""
     def _appel_ollama():
-        response = ollama.chat(model="mistral", messages=[{"role": "user", "content": prompt}])
+        response = _client_ollama.chat(model="mistral", messages=[{"role": "user", "content": prompt}])
         return response["message"]["content"].strip()
 
     future = _EXECUTOR_LLM.submit(_appel_ollama)
@@ -249,7 +261,7 @@ def expliquer_par_type(m: dict, anomalies: list) -> dict:
     # _EXECUTOR_LLM, en parallele - pas d'imbrication de pool.
     futures = {
         type_: _EXECUTOR_LLM.submit(lambda p=_construire_prompt(m, lignes): (
-            ollama.chat(model="mistral", messages=[{"role": "user", "content": p}])["message"]["content"].strip()
+            _client_ollama.chat(model="mistral", messages=[{"role": "user", "content": p}])["message"]["content"].strip()
         ))
         for type_, lignes in par_type.items()
     }
