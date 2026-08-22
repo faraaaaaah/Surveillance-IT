@@ -46,6 +46,7 @@ import provisionnement
 from provisionnement import provisionnement_bp
 from flask_socketio import join_room, emit as socketio_emit_local
 import deploiement_jobs
+import simulation_deploiement
 
 app = Flask(__name__)
 # Cle de session generee et sauvegardee automatiquement (voir auth.py) : pas
@@ -597,6 +598,36 @@ def api_deployer():
     })
 
 
+@app.route("/api/simulation/deployer", methods=["POST"])
+@login_required
+def api_simulation_deployer():
+    """Deploiement 'simule' sur une plage d'IP : aucune connexion reseau
+    reelle, correspondance automatique via inventaire_machines.json
+    (donnees fictives), execution journalisee. Complement pedagogique au
+    vrai flux /api/deployer, pas un remplacement."""
+    if not current_user.is_admin:
+        return jsonify({"succes": False, "erreur": "Reserve aux administrateurs."}), 403
+
+    data = request.get_json(force=True, silent=True) or {}
+    plage = (data.get("plage") or "").strip()
+
+    try:
+        resultats = simulation_deploiement.simuler_deploiement(plage)
+    except ValueError as e:
+        return jsonify({"succes": False, "erreur": str(e)}), 400
+
+    audit.consigner("simulation_deploiement", cible=plage, details=f"{len(resultats)} adresse(s) traitee(s)")
+    return jsonify({"succes": True, "resultats": resultats})
+
+
+@app.route("/api/simulation/journal")
+@login_required
+def api_simulation_journal():
+    if not current_user.is_admin:
+        return jsonify({"erreur": "Reserve aux administrateurs."}), 403
+    return jsonify({"entrees": simulation_deploiement.lire_journal(100)})
+
+
 @app.route("/api/deployer/jobs", methods=["GET"])
 def api_deployer_jobs():
     """Interroge par le relais local (relais_deploiement.py) pour recuperer
@@ -834,6 +865,16 @@ PAGE_HTML = """
   #resultat-deploiement.ok{display:block; background:rgba(63,185,80,.12); border:1px solid var(--ok); color:var(--ok);}
   #resultat-deploiement.err{display:block; background:rgba(248,81,73,.12); border:1px solid var(--crit); color:var(--crit);}
 
+  .tabs-deploiement{display:flex; gap:6px; margin:14px 0 2px; border-bottom:1px solid var(--border);}
+  .tabs-deploiement .tab-btn{flex:1; padding:9px; background:transparent; border:none; border-bottom:2px solid transparent;
+                              color:var(--muted); font-size:12.5px; font-weight:600; cursor:pointer;}
+  .tabs-deploiement .tab-btn.actif{color:var(--accent); border-bottom-color:var(--accent);}
+  #resultat-simulation .resultat{margin-top:16px; padding:12px 14px; border-radius:8px; font-size:12.5px;}
+  #resultat-simulation .resultat.err{background:rgba(248,81,73,.12); border:1px solid var(--crit); color:var(--crit);}
+  .tableau-simulation{width:100%; border-collapse:collapse; margin-top:10px; font-size:12px;}
+  .tableau-simulation th, .tableau-simulation td{padding:7px 8px; border-bottom:1px solid var(--border); text-align:left;}
+  .tableau-simulation th{color:var(--muted); font-weight:600; font-size:10.5px; text-transform:uppercase;}
+
   /* Modal Historique detaille */
   #modal-historique{display:none; position:fixed; inset:0; background:rgba(0,0,0,.6); z-index:100; align-items:center; justify-content:center; padding:24px;}
   #modal-historique.ouvert{display:flex;}
@@ -1038,6 +1079,11 @@ PAGE_HTML = """
       <button class="fermer" onclick="fermerDeploiement()">&times;</button>
     </div>
 
+    <div class="tabs-deploiement">
+      <button type="button" class="tab-btn actif" data-tab="reel" onclick="basculerOngletDeploiement('reel')">Déploiement réel</button>
+      <button type="button" class="tab-btn" data-tab="simulation" onclick="basculerOngletDeploiement('simulation')">Plage IP (simulation)</button>
+    </div>
+
     <form id="form-deploiement" onsubmit="soumettreDeploiement(event)">
       <label>Nom affiché dans le dashboard</label>
       <input type="text" id="dep-nom" placeholder="PC-Comptabilité" required>
@@ -1063,6 +1109,22 @@ PAGE_HTML = """
         <button type="submit" id="btn-deployer-submit">Ajouter et déployer</button>
       </div>
     </form>
+
+    <form id="form-simulation" onsubmit="soumettreSimulation(event)" style="display:none;">
+      <label>Adresse IP ou plage</label>
+      <input type="text" id="sim-plage" placeholder="192.168.1.10-192.168.1.20 ou 192.168.1.0/28 ou 192.168.1.42" required>
+      <p class="aide">
+        Chaque adresse est recherchée dans un inventaire fictif (login, mot de passe et OS trouvés
+        automatiquement) — aucune vraie connexion n'est faite, l'exécution est simulée et journalisée.
+      </p>
+
+      <div class="actions">
+        <button type="button" onclick="fermerDeploiement()">Annuler</button>
+        <button type="submit" id="btn-simulation-submit">Lancer la simulation</button>
+      </div>
+    </form>
+
+    <div id="resultat-simulation"></div>
 
     <div id="resultat-deploiement"></div>
   </div>
@@ -1802,11 +1864,22 @@ function choisirOsDeploiement(os){
 
 function ouvrirDeploiement(){
   document.getElementById('form-deploiement').reset();
+  document.getElementById('form-simulation').reset();
   choisirOsDeploiement('windows');
+  basculerOngletDeploiement('reel');
   const resultat = document.getElementById('resultat-deploiement');
   resultat.className = '';
   resultat.textContent = '';
+  document.getElementById('resultat-simulation').innerHTML = '';
   document.getElementById('modal-deploiement').classList.add('ouvert');
+}
+
+function basculerOngletDeploiement(onglet){
+  document.querySelectorAll('.tabs-deploiement .tab-btn').forEach(b => {
+    b.classList.toggle('actif', b.dataset.tab === onglet);
+  });
+  document.getElementById('form-deploiement').style.display = onglet === 'reel' ? '' : 'none';
+  document.getElementById('form-simulation').style.display = onglet === 'simulation' ? '' : 'none';
 }
 
 function fermerDeploiement(){
@@ -1900,6 +1973,56 @@ async function suivreDeploiement(jobId, resultat, bouton, texteInitial){
     + "Vérifiez que relais_deploiement.py tourne bien sur un PC connecté au réseau de l'entreprise.";
   bouton.disabled = false;
   bouton.textContent = texteInitial;
+}
+
+async function soumettreSimulation(ev){
+  ev.preventDefault();
+  const bouton = document.getElementById('btn-simulation-submit');
+  const resultat = document.getElementById('resultat-simulation');
+  const texteInitial = bouton.textContent;
+  bouton.disabled = true;
+  bouton.textContent = 'Simulation en cours...';
+  resultat.innerHTML = '';
+
+  try{
+    const res = await fetch('/api/simulation/deployer', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({ plage: document.getElementById('sim-plage').value.trim() }),
+    });
+    const data = await res.json().catch(() => ({}));
+
+    if(res.ok && data.succes){
+      resultat.innerHTML = construireTableauSimulation(data.resultats);
+    } else {
+      resultat.innerHTML = `<div class="resultat err">❌ ${data.erreur || 'Échec de la simulation.'}</div>`;
+    }
+  } catch(err){
+    resultat.innerHTML = '<div class="resultat err">❌ Impossible de contacter le dashboard (connexion réseau interrompue).</div>';
+    console.error('Erreur simulation:', err);
+  }
+  bouton.disabled = false;
+  bouton.textContent = texteInitial;
+}
+
+function construireTableauSimulation(resultats){
+  if(!resultats || resultats.length === 0){
+    return '<p class="aide">Aucune adresse dans cette plage.</p>';
+  }
+  const nbSucces = resultats.filter(r => r.statut === 'succes').length;
+  const lignes = resultats.map(r => `
+    <tr>
+      <td>${r.ip}</td>
+      <td>${r.trouve ? (r.nom || '—') : '—'}</td>
+      <td>${r.trouve ? (r.os === 'windows' ? '🪟' : '🐧') + ' ' + r.os : '—'}</td>
+      <td>${r.statut === 'succes' ? '✅ succès' : '❌ échec'}</td>
+    </tr>`).join('');
+  return `
+    <p class="aide">${nbSucces}/${resultats.length} adresse(s) avec correspondance trouvée dans l'inventaire.</p>
+    <table class="tableau-simulation">
+      <thead><tr><th>IP</th><th>Nom</th><th>OS</th><th>Statut</th></tr></thead>
+      <tbody>${lignes}</tbody>
+    </table>`;
 }
 
 // --- Bouton Rapport (PDF a la demande) ---------------------------------
